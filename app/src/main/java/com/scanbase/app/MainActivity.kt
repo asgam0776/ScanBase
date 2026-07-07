@@ -1,7 +1,13 @@
 package com.scanbase.app
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -16,38 +22,70 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.scanbase.app.camera.CameraCaptureScreen
 
 class MainActivity : ComponentActivity() {
+    private var hasCameraPermission by mutableStateOf(false)
+    private val cameraPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCameraPermission = granted
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        hasCameraPermission = isCameraPermissionGranted()
 
         setContentView(
             ComposeView(this).apply {
                 setContent {
-                    ScanBaseApp()
+                    ScanBaseApp(
+                        hasCameraPermission = hasCameraPermission,
+                        onRequestCameraPermission = ::requestCameraPermission
+                    )
                 }
             }
         )
     }
+
+    private fun isCameraPermissionGranted(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestCameraPermission() {
+        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+    }
 }
 
 @Composable
-fun ScanBaseApp() {
+fun ScanBaseApp(
+    hasCameraPermission: Boolean,
+    onRequestCameraPermission: () -> Unit
+) {
     val navController = rememberNavController()
+    var capturedImagePath by remember { mutableStateOf<String?>(null) }
 
     NavHost(
         navController = navController,
@@ -61,13 +99,24 @@ fun ScanBaseApp() {
             )
         }
         composable(Screen.Camera.route) {
-            CameraScreen(onBackClick = navController::navigateUp)
+            CameraScreen(
+                hasCameraPermission = hasCameraPermission,
+                onRequestCameraPermission = onRequestCameraPermission,
+                onBackClick = navController::navigateUp,
+                onImageCaptured = { imagePath ->
+                    capturedImagePath = imagePath
+                    navController.navigate(Screen.DocumentPreview.route)
+                }
+            )
         }
         composable(Screen.GalleryImport.route) {
             GalleryImportScreen(onBackClick = navController::navigateUp)
         }
         composable(Screen.DocumentPreview.route) {
-            DocumentPreviewScreen(onBackClick = navController::navigateUp)
+            DocumentPreviewScreen(
+                imagePath = capturedImagePath,
+                onBackClick = navController::navigateUp
+            )
         }
     }
 }
@@ -115,11 +164,17 @@ fun HomeScreen(
 }
 
 @Composable
-fun CameraScreen(onBackClick: () -> Unit) {
-    PlaceholderScreen(
-        title = "새 스캔",
-        message = "카메라 화면은 다음 단계에서 구현합니다.",
-        onBackClick = onBackClick
+fun CameraScreen(
+    hasCameraPermission: Boolean,
+    onRequestCameraPermission: () -> Unit,
+    onBackClick: () -> Unit,
+    onImageCaptured: (String) -> Unit
+) {
+    CameraCaptureScreen(
+        hasCameraPermission = hasCameraPermission,
+        onRequestCameraPermission = onRequestCameraPermission,
+        onBackClick = onBackClick,
+        onImageCaptured = onImageCaptured
     )
 }
 
@@ -133,12 +188,77 @@ fun GalleryImportScreen(onBackClick: () -> Unit) {
 }
 
 @Composable
-fun DocumentPreviewScreen(onBackClick: () -> Unit) {
-    PlaceholderScreen(
-        title = "최근 문서",
-        message = "문서 미리보기는 다음 단계에서 구현합니다.",
-        onBackClick = onBackClick
-    )
+fun DocumentPreviewScreen(
+    imagePath: String?,
+    onBackClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF7F8FA))
+            .padding(horizontal = 20.dp, vertical = 24.dp)
+    ) {
+        BackButton(onClick = onBackClick)
+
+        if (imagePath == null) {
+            PlaceholderContent(
+                title = "최근 문서",
+                message = "아직 촬영한 문서가 없습니다."
+            )
+        } else {
+            CapturedImagePreview(imagePath = imagePath)
+        }
+    }
+}
+
+@Composable
+private fun CapturedImagePreview(imagePath: String) {
+    val bitmap = remember(imagePath) {
+        BitmapFactory.decodeFile(imagePath)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        BasicText(
+            text = "촬영 이미지",
+            style = TextStyle(
+                color = Color(0xFF111827),
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        if (bitmap == null) {
+            BasicText(
+                text = "이미지를 불러올 수 없습니다.",
+                style = TextStyle(
+                    color = Color(0xFFB91C1C),
+                    fontSize = 17.sp,
+                    textAlign = TextAlign.Center
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "촬영한 문서 이미지",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.Black)
+            )
+        }
+    }
 }
 
 @Composable
@@ -154,42 +274,49 @@ private fun PlaceholderScreen(
             .padding(horizontal = 20.dp, vertical = 24.dp)
     ) {
         BackButton(onClick = onBackClick)
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(bottom = 72.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            BasicText(
-                text = title,
-                style = TextStyle(
-                    color = Color(0xFF111827),
-                    fontSize = 30.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center
-                ),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            BasicText(
-                text = message,
-                style = TextStyle(
-                    color = Color(0xFF4B5563),
-                    fontSize = 17.sp,
-                    textAlign = TextAlign.Center
-                ),
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
+        PlaceholderContent(title = title, message = message)
     }
 }
 
 @Composable
-private fun BackButton(onClick: () -> Unit) {
+private fun PlaceholderContent(
+    title: String,
+    message: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(bottom = 72.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        BasicText(
+            text = title,
+            style = TextStyle(
+                color = Color(0xFF111827),
+                fontSize = 30.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        BasicText(
+            text = message,
+            style = TextStyle(
+                color = Color(0xFF4B5563),
+                fontSize = 17.sp,
+                textAlign = TextAlign.Center
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+fun BackButton(onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
