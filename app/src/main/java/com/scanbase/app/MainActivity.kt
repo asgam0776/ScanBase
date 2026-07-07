@@ -1,12 +1,15 @@
 package com.scanbase.app
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
+import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,17 +42,41 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.scanbase.app.camera.CameraCaptureScreen
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private var hasCameraPermission by mutableStateOf(false)
+    private var importedImagePath by mutableStateOf<String?>(null)
+    private var galleryMessage by mutableStateOf<String?>(null)
+
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasCameraPermission = granted
+    }
+
+    private val photoPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri == null) {
+            galleryMessage = "\uC774\uBBF8\uC9C0 \uC120\uD0DD\uC774 \uCDE8\uC18C\uB418\uC5C8\uC2B5\uB2C8\uB2E4."
+            return@registerForActivityResult
+        }
+
+        val copiedPath = copyPickedImageToCache(uri)
+        if (copiedPath == null) {
+            galleryMessage = "\uC774\uBBF8\uC9C0\uB97C \uAC00\uC838\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
+        } else {
+            importedImagePath = copiedPath
+            galleryMessage = null
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,7 +88,12 @@ class MainActivity : ComponentActivity() {
                 setContent {
                     ScanBaseApp(
                         hasCameraPermission = hasCameraPermission,
-                        onRequestCameraPermission = ::requestCameraPermission
+                        importedImagePath = importedImagePath,
+                        galleryMessage = galleryMessage,
+                        onRequestCameraPermission = ::requestCameraPermission,
+                        onPickGalleryImage = ::pickGalleryImage,
+                        onImportedImageHandled = { importedImagePath = null },
+                        onGalleryMessageShown = { galleryMessage = null }
                     )
                 }
             }
@@ -77,15 +110,62 @@ class MainActivity : ComponentActivity() {
     private fun requestCameraPermission() {
         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
     }
+
+    private fun pickGalleryImage() {
+        photoPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
+
+    private fun copyPickedImageToCache(uri: Uri): String? {
+        return runCatching {
+            val extension = resolveImageExtension(this, uri)
+            val imageFile = createGalleryCacheFile(this, extension)
+
+            contentResolver.openInputStream(uri)?.use { input ->
+                imageFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            } ?: return null
+
+            imageFile.absolutePath
+        }.getOrNull()
+    }
 }
 
 @Composable
 fun ScanBaseApp(
     hasCameraPermission: Boolean,
-    onRequestCameraPermission: () -> Unit
+    importedImagePath: String?,
+    galleryMessage: String?,
+    onRequestCameraPermission: () -> Unit,
+    onPickGalleryImage: () -> Unit,
+    onImportedImageHandled: () -> Unit,
+    onGalleryMessageShown: () -> Unit
 ) {
     val navController = rememberNavController()
-    var capturedImagePath by remember { mutableStateOf<String?>(null) }
+    var previewImagePath by remember { mutableStateOf<String?>(null) }
+    var homeMessage by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(importedImagePath) {
+        importedImagePath?.let { imagePath ->
+            previewImagePath = imagePath
+            onImportedImageHandled()
+            navController.navigate(Screen.DocumentPreview.route)
+        }
+    }
+
+    LaunchedEffect(galleryMessage) {
+        galleryMessage?.let { message ->
+            homeMessage = message
+            onGalleryMessageShown()
+            navController.navigate(Screen.Home.route) {
+                popUpTo(Screen.Home.route) {
+                    inclusive = false
+                }
+            }
+        }
+    }
 
     NavHost(
         navController = navController,
@@ -93,8 +173,9 @@ fun ScanBaseApp(
     ) {
         composable(Screen.Home.route) {
             HomeScreen(
+                message = homeMessage,
                 onNewScanClick = { navController.navigate(Screen.Camera.route) },
-                onGalleryClick = { navController.navigate(Screen.GalleryImport.route) },
+                onGalleryClick = onPickGalleryImage,
                 onRecentDocumentsClick = { navController.navigate(Screen.DocumentPreview.route) }
             )
         }
@@ -104,7 +185,7 @@ fun ScanBaseApp(
                 onRequestCameraPermission = onRequestCameraPermission,
                 onBackClick = navController::navigateUp,
                 onImageCaptured = { imagePath ->
-                    capturedImagePath = imagePath
+                    previewImagePath = imagePath
                     navController.navigate(Screen.DocumentPreview.route)
                 }
             )
@@ -114,7 +195,7 @@ fun ScanBaseApp(
         }
         composable(Screen.DocumentPreview.route) {
             DocumentPreviewScreen(
-                imagePath = capturedImagePath,
+                imagePath = previewImagePath,
                 onBackClick = navController::navigateUp
             )
         }
@@ -130,6 +211,7 @@ private sealed class Screen(val route: String) {
 
 @Composable
 fun HomeScreen(
+    message: String?,
     onNewScanClick: () -> Unit,
     onGalleryClick: () -> Unit,
     onRecentDocumentsClick: () -> Unit
@@ -153,13 +235,18 @@ fun HomeScreen(
             modifier = Modifier.fillMaxWidth()
         )
 
+        if (message != null) {
+            Spacer(modifier = Modifier.height(18.dp))
+            NoticeText(text = message)
+        }
+
         Spacer(modifier = Modifier.height(40.dp))
 
-        HomeButton(text = "새 스캔", onClick = onNewScanClick)
+        HomeButton(text = "\uC0C8 \uC2A4\uCE94", onClick = onNewScanClick)
         Spacer(modifier = Modifier.height(14.dp))
-        HomeButton(text = "갤러리에서 가져오기", onClick = onGalleryClick)
+        HomeButton(text = "\uAC24\uB7EC\uB9AC\uC5D0\uC11C \uAC00\uC838\uC624\uAE30", onClick = onGalleryClick)
         Spacer(modifier = Modifier.height(14.dp))
-        HomeButton(text = "최근 문서", onClick = onRecentDocumentsClick)
+        HomeButton(text = "\uCD5C\uADFC \uBB38\uC11C", onClick = onRecentDocumentsClick)
     }
 }
 
@@ -181,8 +268,8 @@ fun CameraScreen(
 @Composable
 fun GalleryImportScreen(onBackClick: () -> Unit) {
     PlaceholderScreen(
-        title = "갤러리에서 가져오기",
-        message = "갤러리 가져오기는 다음 단계에서 구현합니다.",
+        title = "\uAC24\uB7EC\uB9AC\uC5D0\uC11C \uAC00\uC838\uC624\uAE30",
+        message = "\uD648 \uD654\uBA74\uC5D0\uC11C \uC774\uBBF8\uC9C0\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.",
         onBackClick = onBackClick
     )
 }
@@ -202,17 +289,17 @@ fun DocumentPreviewScreen(
 
         if (imagePath == null) {
             PlaceholderContent(
-                title = "최근 문서",
-                message = "아직 촬영한 문서가 없습니다."
+                title = "\uCD5C\uADFC \uBB38\uC11C",
+                message = "\uC544\uC9C1 \uD45C\uC2DC\uD560 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
             )
         } else {
-            CapturedImagePreview(imagePath = imagePath)
+            ImagePreview(imagePath = imagePath)
         }
     }
 }
 
 @Composable
-private fun CapturedImagePreview(imagePath: String) {
+private fun ImagePreview(imagePath: String) {
     val bitmap = remember(imagePath) {
         BitmapFactory.decodeFile(imagePath)
     }
@@ -224,7 +311,7 @@ private fun CapturedImagePreview(imagePath: String) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         BasicText(
-            text = "촬영 이미지",
+            text = "\uBBF8\uB9AC\uBCF4\uAE30",
             style = TextStyle(
                 color = Color(0xFF111827),
                 fontSize = 28.sp,
@@ -238,7 +325,7 @@ private fun CapturedImagePreview(imagePath: String) {
 
         if (bitmap == null) {
             BasicText(
-                text = "이미지를 불러올 수 없습니다.",
+                text = "\uC774\uBBF8\uC9C0\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",
                 style = TextStyle(
                     color = Color(0xFFB91C1C),
                     fontSize = 17.sp,
@@ -249,7 +336,7 @@ private fun CapturedImagePreview(imagePath: String) {
         } else {
             Image(
                 bitmap = bitmap.asImageBitmap(),
-                contentDescription = "촬영한 문서 이미지",
+                contentDescription = "\uC120\uD0DD\uD55C \uC774\uBBF8\uC9C0",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -316,6 +403,23 @@ private fun PlaceholderContent(
 }
 
 @Composable
+private fun NoticeText(text: String) {
+    BasicText(
+        text = text,
+        style = TextStyle(
+            color = Color(0xFF92400E),
+            fontSize = 15.sp,
+            textAlign = TextAlign.Center
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFFFFF7ED))
+            .padding(12.dp)
+    )
+}
+
+@Composable
 fun BackButton(onClick: () -> Unit) {
     Row(
         modifier = Modifier
@@ -334,7 +438,7 @@ fun BackButton(onClick: () -> Unit) {
         )
         Spacer(modifier = Modifier.width(8.dp))
         BasicText(
-            text = "뒤로",
+            text = "\uB4A4\uB85C",
             style = TextStyle(
                 color = Color(0xFF111827),
                 fontSize = 17.sp,
@@ -370,4 +474,19 @@ private fun HomeButton(
             )
         )
     }
+}
+
+private fun resolveImageExtension(context: Context, uri: Uri): String {
+    val mimeType = context.contentResolver.getType(uri)
+    val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+    return extension?.takeIf { it.isNotBlank() } ?: "jpg"
+}
+
+private fun createGalleryCacheFile(context: Context, extension: String): File {
+    val directory = File(context.cacheDir, "imports").apply {
+        mkdirs()
+    }
+    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+        .format(System.currentTimeMillis())
+    return File(directory, "gallery_$timestamp.$extension")
 }
