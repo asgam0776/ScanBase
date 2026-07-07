@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -52,6 +53,7 @@ import androidx.navigation.compose.rememberNavController
 import com.scanbase.app.camera.CameraCaptureScreen
 import com.scanbase.app.data.ScanDocument
 import com.scanbase.app.data.ScanPage
+import com.scanbase.app.pdf.PdfExporter
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -148,11 +150,14 @@ fun ScanBaseApp(
     onImportedImageHandled: () -> Unit,
     onGalleryMessageShown: () -> Unit
 ) {
+    val context = LocalContext.current
     val navController = rememberNavController()
     var previewImagePath by remember { mutableStateOf<String?>(null) }
     var scanDocument by remember { mutableStateOf(ScanDocument.empty()) }
     var selectedPageId by remember { mutableStateOf<Long?>(null) }
     var homeMessage by remember { mutableStateOf<String?>(null) }
+    var documentMessage by remember { mutableStateOf<String?>(null) }
+    var savedPdfPath by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(importedImagePath) {
         importedImagePath?.let { imagePath ->
@@ -216,6 +221,8 @@ fun ScanBaseApp(
                             pages = scanDocument.pages + page
                         )
                         selectedPageId = page.id
+                        savedPdfPath = null
+                        documentMessage = null
                     }
                     navController.navigate(Screen.DocumentPreview.route)
                 },
@@ -226,6 +233,8 @@ fun ScanBaseApp(
             DocumentPreviewScreen(
                 document = scanDocument,
                 selectedPageId = selectedPageId,
+                message = documentMessage,
+                savedPdfPath = savedPdfPath,
                 onBackClick = navController::navigateUp,
                 onAddPageClick = { navController.navigate(Screen.Camera.route) },
                 onSelectPage = { pageId -> selectedPageId = pageId },
@@ -233,6 +242,7 @@ fun ScanBaseApp(
                     scanDocument = scanDocument.copy(
                         pages = scanDocument.pages.filterNot { it.id == pageId }
                     )
+                    savedPdfPath = null
                     if (selectedPageId == pageId) {
                         selectedPageId = scanDocument.pages.firstOrNull { it.id != pageId }?.id
                     }
@@ -241,11 +251,42 @@ fun ScanBaseApp(
                     scanDocument = scanDocument.copy(
                         pages = movePage(scanDocument.pages, pageId, -1)
                     )
+                    savedPdfPath = null
                 },
                 onMovePageDown = { pageId ->
                     scanDocument = scanDocument.copy(
                         pages = movePage(scanDocument.pages, pageId, 1)
                     )
+                    savedPdfPath = null
+                },
+                onSavePdfClick = {
+                    if (scanDocument.pages.isEmpty()) {
+                        documentMessage = "\uD398\uC774\uC9C0\uAC00 \uC5C6\uC5B4 \u0050\u0044\u0046\uB97C \uC0DD\uC131\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."
+                    } else {
+                        runCatching {
+                            PdfExporter.save(context, scanDocument)
+                        }.onSuccess { file ->
+                            savedPdfPath = file.absolutePath
+                            documentMessage = "\u0050\u0044\u0046 \uC800\uC7A5 \uC644\uB8CC"
+                        }.onFailure {
+                            documentMessage = "\u0050\u0044\u0046 \uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4."
+                        }
+                    }
+                },
+                onSharePdfClick = {
+                    if (scanDocument.pages.isEmpty()) {
+                        documentMessage = "\uD398\uC774\uC9C0\uAC00 \uC5C6\uC5B4 \uACF5\uC720\uD560 \u0050\u0044\u0046\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
+                    } else {
+                        runCatching {
+                            val existingFile = savedPdfPath?.let { File(it) }?.takeIf { it.exists() }
+                            val pdfFile = existingFile ?: PdfExporter.save(context, scanDocument).also {
+                                savedPdfPath = it.absolutePath
+                            }
+                            PdfExporter.share(context, pdfFile)
+                        }.onFailure {
+                            documentMessage = "\u0050\u0044\u0046 \uACF5\uC720\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4."
+                        }
+                    }
                 }
             )
         }
@@ -333,12 +374,16 @@ fun GalleryImportScreen(onBackClick: () -> Unit) {
 fun DocumentPreviewScreen(
     document: ScanDocument,
     selectedPageId: Long?,
+    message: String?,
+    savedPdfPath: String?,
     onBackClick: () -> Unit,
     onAddPageClick: () -> Unit,
     onSelectPage: (Long) -> Unit,
     onDeletePage: (Long) -> Unit,
     onMovePageUp: (Long) -> Unit,
-    onMovePageDown: (Long) -> Unit
+    onMovePageDown: (Long) -> Unit,
+    onSavePdfClick: () -> Unit,
+    onSharePdfClick: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -367,17 +412,33 @@ fun DocumentPreviewScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
 
+        if (message != null) {
+            NoticeText(text = message)
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        if (savedPdfPath != null) {
+            NoticeText(text = "\uC800\uC7A5 \uACBD\uB85C: $savedPdfPath")
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
         if (document.pages.isEmpty()) {
             PlaceholderContent(
                 title = "\uBE48 \uBB38\uC11C",
                 message = "\uC544\uC9C1 \uC2A4\uCE94\uD55C \uD398\uC774\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
             )
             ActionButton(text = "\uD398\uC774\uC9C0 \uCD94\uAC00", onClick = onAddPageClick)
+            Spacer(modifier = Modifier.height(10.dp))
+            ActionButton(text = "\u0050\u0044\u0046 \uC800\uC7A5", onClick = onSavePdfClick)
+            Spacer(modifier = Modifier.height(10.dp))
+            ActionButton(text = "\uACF5\uC720", onClick = onSharePdfClick)
         } else {
             DocumentPageManager(
                 document = document,
                 selectedPageId = selectedPageId,
                 onAddPageClick = onAddPageClick,
+                onSavePdfClick = onSavePdfClick,
+                onSharePdfClick = onSharePdfClick,
                 onSelectPage = onSelectPage,
                 onDeletePage = onDeletePage,
                 onMovePageUp = onMovePageUp,
@@ -460,6 +521,8 @@ private fun DocumentPageManager(
     document: ScanDocument,
     selectedPageId: Long?,
     onAddPageClick: () -> Unit,
+    onSavePdfClick: () -> Unit,
+    onSharePdfClick: () -> Unit,
     onSelectPage: (Long) -> Unit,
     onDeletePage: (Long) -> Unit,
     onMovePageUp: (Long) -> Unit,
@@ -483,6 +546,10 @@ private fun DocumentPageManager(
         Spacer(modifier = Modifier.height(16.dp))
 
         ActionButton(text = "\uD398\uC774\uC9C0 \uCD94\uAC00", onClick = onAddPageClick)
+        Spacer(modifier = Modifier.height(10.dp))
+        ActionButton(text = "\u0050\u0044\u0046 \uC800\uC7A5", onClick = onSavePdfClick)
+        Spacer(modifier = Modifier.height(10.dp))
+        ActionButton(text = "\uACF5\uC720", onClick = onSharePdfClick)
 
         Spacer(modifier = Modifier.height(18.dp))
 
