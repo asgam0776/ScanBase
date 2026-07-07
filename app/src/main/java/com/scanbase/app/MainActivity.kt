@@ -145,13 +145,14 @@ fun ScanBaseApp(
 ) {
     val navController = rememberNavController()
     var previewImagePath by remember { mutableStateOf<String?>(null) }
+    var documentPages by remember { mutableStateOf<List<String>>(emptyList()) }
     var homeMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(importedImagePath) {
         importedImagePath?.let { imagePath ->
             previewImagePath = imagePath
             onImportedImageHandled()
-            navController.navigate(Screen.DocumentPreview.route)
+            navController.navigate(Screen.Preview.route)
         }
     }
 
@@ -186,18 +187,35 @@ fun ScanBaseApp(
                 onBackClick = navController::navigateUp,
                 onImageCaptured = { imagePath ->
                     previewImagePath = imagePath
-                    navController.navigate(Screen.DocumentPreview.route)
+                    navController.navigate(Screen.Preview.route)
                 }
             )
         }
         composable(Screen.GalleryImport.route) {
             GalleryImportScreen(onBackClick = navController::navigateUp)
         }
+        composable(Screen.Preview.route) {
+            PreviewScreen(
+                imagePath = previewImagePath,
+                onBackClick = navController::navigateUp,
+                onRetakeClick = { navController.navigate(Screen.Camera.route) },
+                onAddPageClick = {
+                    previewImagePath?.let { imagePath ->
+                        documentPages = documentPages + imagePath
+                    }
+                    navController.navigate(Screen.DocumentPreview.route)
+                },
+                onCropClick = { navController.navigate(Screen.Crop.route) }
+            )
+        }
         composable(Screen.DocumentPreview.route) {
             DocumentPreviewScreen(
-                imagePath = previewImagePath,
+                pages = documentPages,
                 onBackClick = navController::navigateUp
             )
+        }
+        composable(Screen.Crop.route) {
+            CropScreen(onBackClick = navController::navigateUp)
         }
     }
 }
@@ -206,7 +224,9 @@ private sealed class Screen(val route: String) {
     data object Home : Screen("home")
     data object Camera : Screen("camera")
     data object GalleryImport : Screen("gallery_import")
+    data object Preview : Screen("preview")
     data object DocumentPreview : Screen("document_preview")
+    data object Crop : Screen("crop")
 }
 
 @Composable
@@ -276,7 +296,7 @@ fun GalleryImportScreen(onBackClick: () -> Unit) {
 
 @Composable
 fun DocumentPreviewScreen(
-    imagePath: String?,
+    pages: List<String>,
     onBackClick: () -> Unit
 ) {
     Column(
@@ -287,31 +307,94 @@ fun DocumentPreviewScreen(
     ) {
         BackButton(onClick = onBackClick)
 
-        if (imagePath == null) {
+        if (pages.isEmpty()) {
             PlaceholderContent(
                 title = "\uCD5C\uADFC \uBB38\uC11C",
-                message = "\uC544\uC9C1 \uD45C\uC2DC\uD560 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
+                message = "\uC544\uC9C1 \uCD94\uAC00\uD55C \uD398\uC774\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
             )
         } else {
-            ImagePreview(imagePath = imagePath)
+            DocumentPageList(pages = pages)
         }
     }
 }
 
 @Composable
-private fun ImagePreview(imagePath: String) {
-    val bitmap = remember(imagePath) {
-        BitmapFactory.decodeFile(imagePath)
-    }
-
+fun PreviewScreen(
+    imagePath: String?,
+    onBackClick: () -> Unit,
+    onRetakeClick: () -> Unit,
+    onAddPageClick: () -> Unit,
+    onCropClick: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .background(Color(0xFFF7F8FA))
+            .padding(horizontal = 20.dp, vertical = 24.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BackButton(onClick = onBackClick)
+            BasicText(
+                text = "\uBBF8\uB9AC\uBCF4\uAE30",
+                style = TextStyle(
+                    color = Color(0xFF111827),
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 58.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        if (imagePath == null) {
+            PlaceholderContent(
+                title = "\uC774\uBBF8\uC9C0 \uC5C6\uC74C",
+                message = "\uBBF8\uB9AC\uBCFC \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
+            )
+        } else {
+            ImagePreviewArea(
+                imagePath = imagePath,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            ActionButton(text = "\uB2E4\uC2DC \uCD2C\uC601", onClick = onRetakeClick)
+            Spacer(modifier = Modifier.height(10.dp))
+            ActionButton(text = "\uD398\uC774\uC9C0\uC5D0 \uCD94\uAC00", onClick = onAddPageClick)
+            Spacer(modifier = Modifier.height(10.dp))
+            ActionButton(text = "\uC790\uB974\uAE30/\uBCF4\uC815", onClick = onCropClick)
+        }
+    }
+}
+
+@Composable
+fun CropScreen(onBackClick: () -> Unit) {
+    PlaceholderScreen(
+        title = "\uC790\uB974\uAE30/\uBCF4\uC815",
+        message = "\uC790\uB974\uAE30\uC640 \uBCF4\uC815\uC740 \uB2E4\uC74C \uB2E8\uACC4\uC5D0\uC11C \uAD6C\uD604\uD569\uB2C8\uB2E4.",
+        onBackClick = onBackClick
+    )
+}
+
+@Composable
+private fun DocumentPageList(pages: List<String>) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = 24.dp)
     ) {
         BasicText(
-            text = "\uBBF8\uB9AC\uBCF4\uAE30",
+            text = "\uCD5C\uADFC \uBB38\uC11C",
             style = TextStyle(
                 color = Color(0xFF111827),
                 fontSize = 28.sp,
@@ -321,30 +404,57 @@ private fun ImagePreview(imagePath: String) {
             modifier = Modifier.fillMaxWidth()
         )
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
-        if (bitmap == null) {
+        pages.forEachIndexed { index, imagePath ->
             BasicText(
-                text = "\uC774\uBBF8\uC9C0\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",
+                text = "\uD398\uC774\uC9C0 ${index + 1}",
                 style = TextStyle(
-                    color = Color(0xFFB91C1C),
-                    fontSize = 17.sp,
-                    textAlign = TextAlign.Center
-                ),
-                modifier = Modifier.fillMaxWidth()
+                    color = Color(0xFF111827),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
             )
-        } else {
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = "\uC120\uD0DD\uD55C \uC774\uBBF8\uC9C0",
-                contentScale = ContentScale.Fit,
+            Spacer(modifier = Modifier.height(8.dp))
+            ImagePreviewArea(
+                imagePath = imagePath,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color.Black)
+                    .height(180.dp)
             )
+            Spacer(modifier = Modifier.height(16.dp))
         }
+    }
+}
+
+@Composable
+private fun ImagePreviewArea(
+    imagePath: String,
+    modifier: Modifier = Modifier
+) {
+    val bitmap = remember(imagePath) {
+        BitmapFactory.decodeFile(imagePath)
+    }
+
+    if (bitmap == null) {
+        BasicText(
+            text = "\uC774\uBBF8\uC9C0\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",
+            style = TextStyle(
+                color = Color(0xFFB91C1C),
+                fontSize = 17.sp,
+                textAlign = TextAlign.Center
+            ),
+            modifier = modifier.fillMaxWidth()
+        )
+    } else {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "\uC120\uD0DD\uD55C \uC774\uBBF8\uC9C0",
+            contentScale = ContentScale.Fit,
+            modifier = modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.Black)
+        )
     }
 }
 
@@ -416,6 +526,29 @@ private fun NoticeText(text: String) {
             .clip(RoundedCornerShape(10.dp))
             .background(Color(0xFFFFF7ED))
             .padding(12.dp)
+    )
+}
+
+@Composable
+private fun ActionButton(
+    text: String,
+    onClick: () -> Unit
+) {
+    BasicText(
+        text = text,
+        style = TextStyle(
+            color = Color.White,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(54.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFF2563EB))
+            .clickable(onClick = onClick)
+            .padding(vertical = 16.dp)
     )
 }
 
