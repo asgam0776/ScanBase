@@ -53,6 +53,7 @@ import androidx.navigation.compose.rememberNavController
 import com.scanbase.app.camera.CameraCaptureScreen
 import com.scanbase.app.data.ScanDocument
 import com.scanbase.app.data.ScanPage
+import com.scanbase.app.image.OpenCvRuntime
 import com.scanbase.app.pdf.PdfExporter
 import java.io.File
 import java.text.SimpleDateFormat
@@ -88,6 +89,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        OpenCvRuntime.initialize()
         hasCameraPermission = isCameraPermissionGranted()
 
         setContentView(
