@@ -13,6 +13,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
@@ -47,6 +50,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.scanbase.app.camera.CameraCaptureScreen
+import com.scanbase.app.data.ScanDocument
+import com.scanbase.app.data.ScanPage
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -145,7 +150,8 @@ fun ScanBaseApp(
 ) {
     val navController = rememberNavController()
     var previewImagePath by remember { mutableStateOf<String?>(null) }
-    var documentPages by remember { mutableStateOf<List<String>>(emptyList()) }
+    var scanDocument by remember { mutableStateOf(ScanDocument.empty()) }
+    var selectedPageId by remember { mutableStateOf<Long?>(null) }
     var homeMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(importedImagePath) {
@@ -201,7 +207,15 @@ fun ScanBaseApp(
                 onRetakeClick = { navController.navigate(Screen.Camera.route) },
                 onAddPageClick = {
                     previewImagePath?.let { imagePath ->
-                        documentPages = documentPages + imagePath
+                        val page = ScanPage(
+                            id = System.currentTimeMillis(),
+                            imagePath = imagePath,
+                            createdAtMillis = System.currentTimeMillis()
+                        )
+                        scanDocument = scanDocument.copy(
+                            pages = scanDocument.pages + page
+                        )
+                        selectedPageId = page.id
                     }
                     navController.navigate(Screen.DocumentPreview.route)
                 },
@@ -210,8 +224,29 @@ fun ScanBaseApp(
         }
         composable(Screen.DocumentPreview.route) {
             DocumentPreviewScreen(
-                pages = documentPages,
-                onBackClick = navController::navigateUp
+                document = scanDocument,
+                selectedPageId = selectedPageId,
+                onBackClick = navController::navigateUp,
+                onAddPageClick = { navController.navigate(Screen.Camera.route) },
+                onSelectPage = { pageId -> selectedPageId = pageId },
+                onDeletePage = { pageId ->
+                    scanDocument = scanDocument.copy(
+                        pages = scanDocument.pages.filterNot { it.id == pageId }
+                    )
+                    if (selectedPageId == pageId) {
+                        selectedPageId = scanDocument.pages.firstOrNull { it.id != pageId }?.id
+                    }
+                },
+                onMovePageUp = { pageId ->
+                    scanDocument = scanDocument.copy(
+                        pages = movePage(scanDocument.pages, pageId, -1)
+                    )
+                },
+                onMovePageDown = { pageId ->
+                    scanDocument = scanDocument.copy(
+                        pages = movePage(scanDocument.pages, pageId, 1)
+                    )
+                }
             )
         }
         composable(Screen.Crop.route) {
@@ -296,8 +331,14 @@ fun GalleryImportScreen(onBackClick: () -> Unit) {
 
 @Composable
 fun DocumentPreviewScreen(
-    pages: List<String>,
-    onBackClick: () -> Unit
+    document: ScanDocument,
+    selectedPageId: Long?,
+    onBackClick: () -> Unit,
+    onAddPageClick: () -> Unit,
+    onSelectPage: (Long) -> Unit,
+    onDeletePage: (Long) -> Unit,
+    onMovePageUp: (Long) -> Unit,
+    onMovePageDown: (Long) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -305,15 +346,43 @@ fun DocumentPreviewScreen(
             .background(Color(0xFFF7F8FA))
             .padding(horizontal = 20.dp, vertical = 24.dp)
     ) {
-        BackButton(onClick = onBackClick)
-
-        if (pages.isEmpty()) {
-            PlaceholderContent(
-                title = "\uCD5C\uADFC \uBB38\uC11C",
-                message = "\uC544\uC9C1 \uCD94\uAC00\uD55C \uD398\uC774\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BackButton(onClick = onBackClick)
+            BasicText(
+                text = "\uCD5C\uADFC \uBB38\uC11C",
+                style = TextStyle(
+                    color = Color(0xFF111827),
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 58.dp)
             )
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        if (document.pages.isEmpty()) {
+            PlaceholderContent(
+                title = "\uBE48 \uBB38\uC11C",
+                message = "\uC544\uC9C1 \uC2A4\uCE94\uD55C \uD398\uC774\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
+            )
+            ActionButton(text = "\uD398\uC774\uC9C0 \uCD94\uAC00", onClick = onAddPageClick)
         } else {
-            DocumentPageList(pages = pages)
+            DocumentPageManager(
+                document = document,
+                selectedPageId = selectedPageId,
+                onAddPageClick = onAddPageClick,
+                onSelectPage = onSelectPage,
+                onDeletePage = onDeletePage,
+                onMovePageUp = onMovePageUp,
+                onMovePageDown = onMovePageDown
+            )
         }
     }
 }
@@ -387,42 +456,140 @@ fun CropScreen(onBackClick: () -> Unit) {
 }
 
 @Composable
-private fun DocumentPageList(pages: List<String>) {
+private fun DocumentPageManager(
+    document: ScanDocument,
+    selectedPageId: Long?,
+    onAddPageClick: () -> Unit,
+    onSelectPage: (Long) -> Unit,
+    onDeletePage: (Long) -> Unit,
+    onMovePageUp: (Long) -> Unit,
+    onMovePageDown: (Long) -> Unit
+) {
+    val selectedPage = document.pages.firstOrNull { it.id == selectedPageId }
+        ?: document.pages.first()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 24.dp)
+            .verticalScroll(rememberScrollState())
     ) {
-        BasicText(
-            text = "\uCD5C\uADFC \uBB38\uC11C",
-            style = TextStyle(
-                color = Color(0xFF111827),
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            ),
-            modifier = Modifier.fillMaxWidth()
+        ImagePreviewArea(
+            imagePath = selectedPage.imagePath,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(320.dp)
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        pages.forEachIndexed { index, imagePath ->
-            BasicText(
-                text = "\uD398\uC774\uC9C0 ${index + 1}",
-                style = TextStyle(
-                    color = Color(0xFF111827),
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+        ActionButton(text = "\uD398\uC774\uC9C0 \uCD94\uAC00", onClick = onAddPageClick)
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        BasicText(
+            text = "\uD398\uC774\uC9C0 \uBAA9\uB85D",
+            style = TextStyle(
+                color = Color(0xFF111827),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        document.pages.forEachIndexed { index, page ->
+            PageListItem(
+                page = page,
+                pageNumber = index + 1,
+                isSelected = page.id == selectedPage.id,
+                canMoveUp = index > 0,
+                canMoveDown = index < document.pages.lastIndex,
+                onSelectPage = onSelectPage,
+                onDeletePage = onDeletePage,
+                onMovePageUp = onMovePageUp,
+                onMovePageDown = onMovePageDown
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun PageListItem(
+    page: ScanPage,
+    pageNumber: Int,
+    isSelected: Boolean,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onSelectPage: (Long) -> Unit,
+    onDeletePage: (Long) -> Unit,
+    onMovePageUp: (Long) -> Unit,
+    onMovePageDown: (Long) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (isSelected) Color(0xFFEFF6FF) else Color.White)
+            .clickable { onSelectPage(page.id) }
+            .padding(12.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             ImagePreviewArea(
-                imagePath = imagePath,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp)
+                imagePath = page.imagePath,
+                modifier = Modifier.size(82.dp)
             )
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                BasicText(
+                    text = "\uD398\uC774\uC9C0 $pageNumber",
+                    style = TextStyle(
+                        color = Color(0xFF111827),
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                BasicText(
+                    text = if (isSelected) "\uC120\uD0DD\uB428" else "\uD0ED\uD558\uBA74 \uD06C\uAC8C \uBCF4\uAE30",
+                    style = TextStyle(
+                        color = Color(0xFF4B5563),
+                        fontSize = 13.sp
+                    )
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SmallActionButton(
+                text = "\uC704",
+                enabled = canMoveUp,
+                onClick = { onMovePageUp(page.id) },
+                modifier = Modifier.weight(1f)
+            )
+            SmallActionButton(
+                text = "\uC544\uB798",
+                enabled = canMoveDown,
+                onClick = { onMovePageDown(page.id) },
+                modifier = Modifier.weight(1f)
+            )
+            SmallActionButton(
+                text = "\uC0AD\uC81C",
+                enabled = true,
+                onClick = { onDeletePage(page.id) },
+                modifier = Modifier.weight(1f),
+                backgroundColor = Color(0xFFB91C1C)
+            )
         }
     }
 }
@@ -553,6 +720,31 @@ private fun ActionButton(
 }
 
 @Composable
+private fun SmallActionButton(
+    text: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    backgroundColor: Color = Color(0xFF374151)
+) {
+    BasicText(
+        text = text,
+        style = TextStyle(
+            color = Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center
+        ),
+        modifier = modifier
+            .height(42.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (enabled) backgroundColor else Color(0xFF9CA3AF))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 12.dp)
+    )
+}
+
+@Composable
 fun BackButton(onClick: () -> Unit) {
     Row(
         modifier = Modifier
@@ -622,4 +814,21 @@ private fun createGalleryCacheFile(context: Context, extension: String): File {
     val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
         .format(System.currentTimeMillis())
     return File(directory, "gallery_$timestamp.$extension")
+}
+
+private fun movePage(
+    pages: List<ScanPage>,
+    pageId: Long,
+    direction: Int
+): List<ScanPage> {
+    val currentIndex = pages.indexOfFirst { it.id == pageId }
+    if (currentIndex == -1) return pages
+
+    val targetIndex = currentIndex + direction
+    if (targetIndex !in pages.indices) return pages
+
+    return pages.toMutableList().apply {
+        val page = removeAt(currentIndex)
+        add(targetIndex, page)
+    }
 }
