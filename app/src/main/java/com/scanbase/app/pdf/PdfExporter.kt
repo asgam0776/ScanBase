@@ -1,4 +1,4 @@
-package com.scanbase.app.pdf
+﻿package com.scanbase.app.pdf
 
 import android.content.Context
 import android.content.Intent
@@ -43,7 +43,7 @@ object PdfExporter {
                 val canvas = pdfPage.canvas
 
                 canvas.drawColor(Color.WHITE)
-                val bitmap = decodeBitmap(context, page.imagePath)
+                val bitmap = decodeBitmap(context, page.exportImageUri)
                 if (bitmap != null) {
                     val targetRect = fitCenterRect(
                         imageWidth = bitmap.width.toFloat(),
@@ -113,3 +113,4 @@ object PdfExporter {
         return RectF(left, top, left + width, top + height)
     }
 }
+

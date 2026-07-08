@@ -199,6 +199,8 @@ fun ScanBaseApp(
     var cropImagePath by remember { mutableStateOf<String?>(null) }
     var cropMessage by remember { mutableStateOf<String?>(null) }
     var resultImagePath by remember { mutableStateOf<String?>(null) }
+    var editingPageId by remember { mutableStateOf<Long?>(null) }
+    var selectedPageShowOriginal by remember { mutableStateOf(false) }
 
     LaunchedEffect(importedImagePath) {
         importedImagePath?.let { imagePath ->
@@ -209,6 +211,8 @@ fun ScanBaseApp(
             cropViewModel.resetIfImageChanged(imagePath)
             cropMessage = null
             resultImagePath = null
+            editingPageId = null
+            selectedPageShowOriginal = false
             onImportedImageHandled()
             navController.navigate(Screen.Preview.route)
         }
@@ -251,6 +255,8 @@ fun ScanBaseApp(
                     cropViewModel.resetIfImageChanged(imagePath)
                     cropMessage = null
                     resultImagePath = null
+                    editingPageId = null
+                    selectedPageShowOriginal = false
                     navController.navigate(Screen.Preview.route)
                 }
             )
@@ -267,7 +273,10 @@ fun ScanBaseApp(
                     previewImagePath?.let { imagePath ->
                         val page = ScanPage(
                             id = System.currentTimeMillis(),
-                            imagePath = imagePath,
+                            originalImageUri = imagePath,
+                            perspectiveImageUri = null,
+                            processedImageUri = imagePath,
+                            enhanceMode = EnhanceMode.Original,
                             createdAtMillis = System.currentTimeMillis()
                         )
                         scanDocument = scanDocument.copy(
@@ -314,7 +323,11 @@ fun ScanBaseApp(
                 savedPdfPath = savedPdfPath,
                 onBackClick = navController::navigateUp,
                 onAddPageClick = { navController.navigate(Screen.Camera.route) },
-                onSelectPage = { pageId -> selectedPageId = pageId },
+                selectedPageShowOriginal = selectedPageShowOriginal,
+                onSelectPage = { pageId ->
+                    selectedPageId = pageId
+                    selectedPageShowOriginal = scanDocument.pages.firstOrNull { it.id == pageId }?.useOriginalForExport ?: false
+                },
                 onDeletePage = { pageId ->
                     scanDocument = scanDocument.copy(
                         pages = scanDocument.pages.filterNot { it.id == pageId }
@@ -334,6 +347,46 @@ fun ScanBaseApp(
                     scanDocument = scanDocument.copy(
                         pages = movePage(scanDocument.pages, pageId, 1)
                     )
+                    savedPdfPath = null
+                },
+                onShowOriginalPage = {
+                    selectedPageShowOriginal = true
+                },
+                onShowProcessedPage = {
+                    selectedPageShowOriginal = false
+                },
+                onRecropPage = { page ->
+                    editingPageId = page.id
+                    previewImagePath = page.originalImageUri
+                    resultImagePath = null
+                    cropMessage = null
+                    cropCorners = null
+                    cropImagePath = null
+                    cropViewModel.resetIfImageChanged(page.originalImageUri)
+                    decodeBitmapFromUriString(context, page.originalImageUri)?.let { bitmap ->
+                        try {
+                            val detectedCorners = DocumentDetector.detect(bitmap)
+                            cropViewModel.initialize(
+                                imageUri = page.originalImageUri,
+                                bitmapWidth = bitmap.width,
+                                bitmapHeight = bitmap.height,
+                                detectedCorners = detectedCorners
+                            )
+                            cropCorners = detectedCorners
+                            cropImagePath = page.originalImageUri
+                        } finally {
+                            bitmap.recycle()
+                        }
+                    }
+                    navController.navigate(Screen.Crop.route)
+                },
+                onUseOriginalForExport = { pageId ->
+                    scanDocument = scanDocument.copy(
+                        pages = scanDocument.pages.map { page ->
+                            if (page.id == pageId) page.copy(useOriginalForExport = true) else page
+                        }
+                    )
+                    selectedPageShowOriginal = true
                     savedPdfPath = null
                 },
                 onSavePdfClick = {
@@ -418,20 +471,45 @@ fun ScanBaseApp(
                 imagePath = resultImagePath,
                 onBackClick = navController::navigateUp,
                 onRecropClick = navController::navigateUp,
-                onAddPageClick = { enhancedImagePath ->
-                    val page = ScanPage(
-                        id = System.currentTimeMillis(),
-                        imagePath = enhancedImagePath,
-                        createdAtMillis = System.currentTimeMillis()
-                    )
-                    scanDocument = scanDocument.copy(
-                        pages = scanDocument.pages + page
-                    )
-                    selectedPageId = page.id
-                    savedPdfPath = null
-                    documentMessage = null
-                    previewImagePath = enhancedImagePath
-                    navController.navigate(Screen.DocumentPreview.route)
+                onAddPageClick = { enhancedImagePath, enhanceMode ->
+                    val originalImagePath = previewImagePath
+                    val perspectiveImagePath = resultImagePath
+                    if (originalImagePath != null && perspectiveImagePath != null) {
+                        val currentEditingPageId = editingPageId
+                        if (currentEditingPageId == null) {
+                            val page = ScanPage(
+                                id = System.currentTimeMillis(),
+                                originalImageUri = originalImagePath,
+                                perspectiveImageUri = perspectiveImagePath,
+                                processedImageUri = enhancedImagePath,
+                                enhanceMode = enhanceMode,
+                                createdAtMillis = System.currentTimeMillis()
+                            )
+                            scanDocument = scanDocument.copy(pages = scanDocument.pages + page)
+                            selectedPageId = page.id
+                        } else {
+                            scanDocument = scanDocument.copy(
+                                pages = scanDocument.pages.map { page ->
+                                    if (page.id == currentEditingPageId) {
+                                        page.copy(
+                                            perspectiveImageUri = perspectiveImagePath,
+                                            processedImageUri = enhancedImagePath,
+                                            enhanceMode = enhanceMode,
+                                            useOriginalForExport = false
+                                        )
+                                    } else {
+                                        page
+                                    }
+                                }
+                            )
+                            selectedPageId = currentEditingPageId
+                        }
+                        savedPdfPath = null
+                        documentMessage = null
+                        selectedPageShowOriginal = false
+                        editingPageId = null
+                        navController.navigate(Screen.DocumentPreview.route)
+                    }
                 }
             )
         }
@@ -517,6 +595,7 @@ fun GalleryImportScreen(onBackClick: () -> Unit) {
 fun DocumentPreviewScreen(
     document: ScanDocument,
     selectedPageId: Long?,
+    selectedPageShowOriginal: Boolean,
     message: String?,
     savedPdfPath: String?,
     onBackClick: () -> Unit,
@@ -525,6 +604,10 @@ fun DocumentPreviewScreen(
     onDeletePage: (Long) -> Unit,
     onMovePageUp: (Long) -> Unit,
     onMovePageDown: (Long) -> Unit,
+    onShowOriginalPage: () -> Unit,
+    onShowProcessedPage: () -> Unit,
+    onRecropPage: (ScanPage) -> Unit,
+    onUseOriginalForExport: (Long) -> Unit,
     onSavePdfClick: () -> Unit,
     onSharePdfClick: () -> Unit
 ) {
@@ -579,13 +662,18 @@ fun DocumentPreviewScreen(
             DocumentPageManager(
                 document = document,
                 selectedPageId = selectedPageId,
+                selectedPageShowOriginal = selectedPageShowOriginal,
                 onAddPageClick = onAddPageClick,
                 onSavePdfClick = onSavePdfClick,
                 onSharePdfClick = onSharePdfClick,
                 onSelectPage = onSelectPage,
                 onDeletePage = onDeletePage,
                 onMovePageUp = onMovePageUp,
-                onMovePageDown = onMovePageDown
+                onMovePageDown = onMovePageDown,
+                onShowOriginalPage = onShowOriginalPage,
+                onShowProcessedPage = onShowProcessedPage,
+                onRecropPage = onRecropPage,
+                onUseOriginalForExport = onUseOriginalForExport
             )
         }
     }
@@ -655,7 +743,7 @@ fun EnhanceScreen(
     imagePath: String?,
     onBackClick: () -> Unit,
     onRecropClick: () -> Unit,
-    onAddPageClick: (String) -> Unit
+    onAddPageClick: (String, EnhanceMode) -> Unit
 ) {
     val context = LocalContext.current
     val sourceBitmap = remember(imagePath) {
@@ -793,7 +881,7 @@ fun EnhanceScreen(
                         errorMessage = "이미지 보정에 실패했습니다. 다른 모드를 선택해주세요."
                     } else {
                         Log.d(AppTag, "EnhanceScreen add page mode=$selectedMode path=$selectedPath")
-                        onAddPageClick(selectedPath)
+                        onAddPageClick(selectedPath, selectedMode)
                     }
                 }
             )
@@ -1151,16 +1239,26 @@ private fun findNearestCorner(
 private fun DocumentPageManager(
     document: ScanDocument,
     selectedPageId: Long?,
+    selectedPageShowOriginal: Boolean,
     onAddPageClick: () -> Unit,
     onSavePdfClick: () -> Unit,
     onSharePdfClick: () -> Unit,
     onSelectPage: (Long) -> Unit,
     onDeletePage: (Long) -> Unit,
     onMovePageUp: (Long) -> Unit,
-    onMovePageDown: (Long) -> Unit
+    onMovePageDown: (Long) -> Unit,
+    onShowOriginalPage: () -> Unit,
+    onShowProcessedPage: () -> Unit,
+    onRecropPage: (ScanPage) -> Unit,
+    onUseOriginalForExport: (Long) -> Unit
 ) {
     val selectedPage = document.pages.firstOrNull { it.id == selectedPageId }
         ?: document.pages.first()
+    val selectedImagePath = if (selectedPageShowOriginal) {
+        selectedPage.originalImageUri
+    } else {
+        selectedPage.processedPreviewImageUri
+    }
 
     Column(
         modifier = Modifier
@@ -1168,10 +1266,65 @@ private fun DocumentPageManager(
             .verticalScroll(rememberScrollState())
     ) {
         ImagePreviewArea(
-            imagePath = selectedPage.imagePath,
+            imagePath = selectedImagePath,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(320.dp)
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SmallActionButton(
+                text = "원본 보기",
+                enabled = true,
+                onClick = onShowOriginalPage,
+                modifier = Modifier.weight(1f),
+                backgroundColor = if (selectedPageShowOriginal) Color(0xFF2563EB) else Color(0xFF374151)
+            )
+            SmallActionButton(
+                text = "보정본 보기",
+                enabled = true,
+                onClick = onShowProcessedPage,
+                modifier = Modifier.weight(1f),
+                backgroundColor = if (!selectedPageShowOriginal) Color(0xFF2563EB) else Color(0xFF374151)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SmallActionButton(
+                text = "다시 자르기",
+                enabled = true,
+                onClick = { onRecropPage(selectedPage) },
+                modifier = Modifier.weight(1f)
+            )
+            SmallActionButton(
+                text = "원본으로 되돌리기",
+                enabled = true,
+                onClick = { onUseOriginalForExport(selectedPage.id) },
+                modifier = Modifier.weight(1f),
+                backgroundColor = Color(0xFF6B7280)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        BasicText(
+            text = "PDF 출력: " + if (selectedPage.useOriginalForExport) "원본" else "보정본",
+            style = TextStyle(
+                color = Color(0xFF4B5563),
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center
+            ),
+            modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -1212,7 +1365,6 @@ private fun DocumentPageManager(
         }
     }
 }
-
 @Composable
 private fun PageListItem(
     page: ScanPage,
@@ -1237,7 +1389,7 @@ private fun PageListItem(
             verticalAlignment = Alignment.CenterVertically
         ) {
             ImagePreviewArea(
-                imagePath = page.imagePath,
+                imagePath = page.defaultPreviewImageUri,
                 modifier = Modifier.size(82.dp)
             )
             Spacer(modifier = Modifier.width(12.dp))
@@ -1564,6 +1716,8 @@ private fun decodeBitmapFromUriString(
         }
     }
 }
+
+
 
 
 
