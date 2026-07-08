@@ -9,7 +9,8 @@ data class ScanPage(
     val processedImageUri: String? = null,
     val enhanceMode: EnhanceMode = EnhanceMode.Original,
     val useOriginalForExport: Boolean = false,
-    val createdAtMillis: Long
+    val createdAtMillis: Long,
+    val updatedAtMillis: Long? = null
 ) {
     val processedPreviewImageUri: String
         get() = processedImageUri ?: perspectiveImageUri ?: originalImageUri
@@ -23,6 +24,23 @@ data class ScanPage(
         } else {
             processedPreviewImageUri
         }
+
+    fun replaceImages(
+        originalImageUri: String,
+        perspectiveImageUri: String,
+        processedImageUri: String,
+        enhanceMode: EnhanceMode,
+        updatedAtMillis: Long
+    ): ScanPage {
+        return copy(
+            originalImageUri = originalImageUri,
+            perspectiveImageUri = perspectiveImageUri,
+            processedImageUri = processedImageUri,
+            enhanceMode = enhanceMode,
+            useOriginalForExport = false,
+            updatedAtMillis = updatedAtMillis
+        )
+    }
 }
 
 data class ScanDocument(

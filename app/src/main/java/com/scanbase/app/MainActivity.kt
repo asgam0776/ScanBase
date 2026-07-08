@@ -204,23 +204,43 @@ fun ScanBaseApp(
 
     LaunchedEffect(importedImagePath) {
         importedImagePath?.let { imagePath ->
-            Log.d(AppTag, "PreviewScreen from gallery normalizedUri=$imagePath")
+            Log.d(AppTag, "PreviewScreen from gallery normalizedUri=$imagePath replacePageId=$editingPageId")
             previewImagePath = imagePath
             cropCorners = null
             cropImagePath = null
             cropViewModel.resetIfImageChanged(imagePath)
             cropMessage = null
             resultImagePath = null
-            editingPageId = null
             selectedPageShowOriginal = false
             onImportedImageHandled()
-            navController.navigate(Screen.Preview.route)
+
+            if (editingPageId == null) {
+                navController.navigate(Screen.Preview.route)
+            } else {
+                decodeBitmapFromUriString(context, imagePath)?.let { bitmap ->
+                    try {
+                        val detectedCorners = DocumentDetector.detect(bitmap)
+                        cropViewModel.initialize(
+                            imageUri = imagePath,
+                            bitmapWidth = bitmap.width,
+                            bitmapHeight = bitmap.height,
+                            detectedCorners = detectedCorners
+                        )
+                        cropCorners = detectedCorners
+                        cropImagePath = imagePath
+                    } finally {
+                        bitmap.recycle()
+                    }
+                }
+                navController.navigate(Screen.Crop.route)
+            }
         }
     }
 
     LaunchedEffect(galleryMessage) {
         galleryMessage?.let { message ->
             homeMessage = message
+            editingPageId = null
             onGalleryMessageShown()
             navController.navigate(Screen.Home.route) {
                 popUpTo(Screen.Home.route) {
@@ -237,8 +257,14 @@ fun ScanBaseApp(
         composable(Screen.Home.route) {
             HomeScreen(
                 message = homeMessage,
-                onNewScanClick = { navController.navigate(Screen.Camera.route) },
-                onGalleryClick = onPickGalleryImage,
+                onNewScanClick = {
+                    editingPageId = null
+                    navController.navigate(Screen.Camera.route)
+                },
+                onGalleryClick = {
+                    editingPageId = null
+                    onPickGalleryImage()
+                },
                 onRecentDocumentsClick = { navController.navigate(Screen.DocumentPreview.route) }
             )
         }
@@ -246,18 +272,44 @@ fun ScanBaseApp(
             CameraScreen(
                 hasCameraPermission = hasCameraPermission,
                 onRequestCameraPermission = onRequestCameraPermission,
-                onBackClick = navController::navigateUp,
+                onBackClick = {
+                    if (editingPageId != null) {
+                        editingPageId = null
+                        previewImagePath = null
+                        resultImagePath = null
+                    }
+                    navController.navigateUp()
+                },
                 onImageCaptured = { imagePath ->
-                    Log.d(AppTag, "PreviewScreen from camera normalizedUri=$imagePath")
+                    Log.d(AppTag, "PreviewScreen from camera normalizedUri=$imagePath replacePageId=$editingPageId")
                     previewImagePath = imagePath
                     cropCorners = null
                     cropImagePath = null
                     cropViewModel.resetIfImageChanged(imagePath)
                     cropMessage = null
                     resultImagePath = null
-                    editingPageId = null
                     selectedPageShowOriginal = false
-                    navController.navigate(Screen.Preview.route)
+
+                    if (editingPageId == null) {
+                        navController.navigate(Screen.Preview.route)
+                    } else {
+                        decodeBitmapFromUriString(context, imagePath)?.let { bitmap ->
+                            try {
+                                val detectedCorners = DocumentDetector.detect(bitmap)
+                                cropViewModel.initialize(
+                                    imageUri = imagePath,
+                                    bitmapWidth = bitmap.width,
+                                    bitmapHeight = bitmap.height,
+                                    detectedCorners = detectedCorners
+                                )
+                                cropCorners = detectedCorners
+                                cropImagePath = imagePath
+                            } finally {
+                                bitmap.recycle()
+                            }
+                        }
+                        navController.navigate(Screen.Crop.route)
+                    }
                 }
             )
         }
@@ -268,7 +320,10 @@ fun ScanBaseApp(
             PreviewScreen(
                 imagePath = previewImagePath,
                 onBackClick = navController::navigateUp,
-                onRetakeClick = { navController.navigate(Screen.Camera.route) },
+                onRetakeClick = {
+                    editingPageId = null
+                    navController.navigate(Screen.Camera.route)
+                },
                 onAddPageClick = {
                     previewImagePath?.let { imagePath ->
                         val page = ScanPage(
@@ -322,7 +377,10 @@ fun ScanBaseApp(
                 message = documentMessage,
                 savedPdfPath = savedPdfPath,
                 onBackClick = navController::navigateUp,
-                onAddPageClick = { navController.navigate(Screen.Camera.route) },
+                onAddPageClick = {
+                    editingPageId = null
+                    navController.navigate(Screen.Camera.route)
+                },
                 selectedPageShowOriginal = selectedPageShowOriginal,
                 onSelectPage = { pageId ->
                     selectedPageId = pageId
@@ -380,6 +438,26 @@ fun ScanBaseApp(
                     }
                     navController.navigate(Screen.Crop.route)
                 },
+                onReplaceWithCamera = { page ->
+                    editingPageId = page.id
+                    previewImagePath = null
+                    resultImagePath = null
+                    cropMessage = null
+                    cropCorners = null
+                    cropImagePath = null
+                    selectedPageShowOriginal = false
+                    navController.navigate(Screen.Camera.route)
+                },
+                onReplaceWithGallery = { page ->
+                    editingPageId = page.id
+                    previewImagePath = null
+                    resultImagePath = null
+                    cropMessage = null
+                    cropCorners = null
+                    cropImagePath = null
+                    selectedPageShowOriginal = false
+                    onPickGalleryImage()
+                },
                 onUseOriginalForExport = { pageId ->
                     scanDocument = scanDocument.copy(
                         pages = scanDocument.pages.map { page ->
@@ -425,7 +503,12 @@ fun ScanBaseApp(
                 imagePath = previewImagePath,
                 cropState = cropViewModel.state,
                 message = cropMessage,
-                onBackClick = navController::navigateUp,
+                onBackClick = {
+                    if (editingPageId != null) {
+                        editingPageId = null
+                    }
+                    navController.navigateUp()
+                },
                 onSelectCorner = cropViewModel::setSelectedCorner,
                 onUpdateCorner = cropViewModel::updateCorner,
                 onFineTuneCorner = cropViewModel::moveSelectedCorner,
@@ -469,6 +552,7 @@ fun ScanBaseApp(
         composable(Screen.Enhance.route) {
             EnhanceScreen(
                 imagePath = resultImagePath,
+                isReplacingPage = editingPageId != null,
                 onBackClick = navController::navigateUp,
                 onRecropClick = navController::navigateUp,
                 onAddPageClick = { enhancedImagePath, enhanceMode ->
@@ -491,11 +575,12 @@ fun ScanBaseApp(
                             scanDocument = scanDocument.copy(
                                 pages = scanDocument.pages.map { page ->
                                     if (page.id == currentEditingPageId) {
-                                        page.copy(
+                                        page.replaceImages(
+                                            originalImageUri = originalImagePath,
                                             perspectiveImageUri = perspectiveImagePath,
                                             processedImageUri = enhancedImagePath,
                                             enhanceMode = enhanceMode,
-                                            useOriginalForExport = false
+                                            updatedAtMillis = System.currentTimeMillis()
                                         )
                                     } else {
                                         page
@@ -607,6 +692,8 @@ fun DocumentPreviewScreen(
     onShowOriginalPage: () -> Unit,
     onShowProcessedPage: () -> Unit,
     onRecropPage: (ScanPage) -> Unit,
+    onReplaceWithCamera: (ScanPage) -> Unit,
+    onReplaceWithGallery: (ScanPage) -> Unit,
     onUseOriginalForExport: (Long) -> Unit,
     onSavePdfClick: () -> Unit,
     onSharePdfClick: () -> Unit
@@ -673,6 +760,8 @@ fun DocumentPreviewScreen(
                 onShowOriginalPage = onShowOriginalPage,
                 onShowProcessedPage = onShowProcessedPage,
                 onRecropPage = onRecropPage,
+                onReplaceWithCamera = onReplaceWithCamera,
+                onReplaceWithGallery = onReplaceWithGallery,
                 onUseOriginalForExport = onUseOriginalForExport
             )
         }
@@ -741,6 +830,7 @@ fun PreviewScreen(
 @Composable
 fun EnhanceScreen(
     imagePath: String?,
+    isReplacingPage: Boolean,
     onBackClick: () -> Unit,
     onRecropClick: () -> Unit,
     onAddPageClick: (String, EnhanceMode) -> Unit
@@ -874,7 +964,7 @@ fun EnhanceScreen(
             ActionButton(text = "다시 자르기", onClick = onRecropClick)
             Spacer(modifier = Modifier.height(10.dp))
             ActionButton(
-                text = "페이지에 추가",
+                text = if (isReplacingPage) "페이지 교체" else "페이지에 추가",
                 onClick = {
                     val selectedPath = displayImagePath
                     if (selectedPath == null) {
@@ -1250,6 +1340,8 @@ private fun DocumentPageManager(
     onShowOriginalPage: () -> Unit,
     onShowProcessedPage: () -> Unit,
     onRecropPage: (ScanPage) -> Unit,
+    onReplaceWithCamera: (ScanPage) -> Unit,
+    onReplaceWithGallery: (ScanPage) -> Unit,
     onUseOriginalForExport: (Long) -> Unit
 ) {
     val selectedPage = document.pages.firstOrNull { it.id == selectedPageId }
@@ -1312,6 +1404,28 @@ private fun DocumentPageManager(
                 onClick = { onUseOriginalForExport(selectedPage.id) },
                 modifier = Modifier.weight(1f),
                 backgroundColor = Color(0xFF6B7280)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SmallActionButton(
+                text = "재촬영",
+                enabled = true,
+                onClick = { onReplaceWithCamera(selectedPage) },
+                modifier = Modifier.weight(1f),
+                backgroundColor = Color(0xFF2563EB)
+            )
+            SmallActionButton(
+                text = "갤러리에서 교체",
+                enabled = true,
+                onClick = { onReplaceWithGallery(selectedPage) },
+                modifier = Modifier.weight(1f),
+                backgroundColor = Color(0xFF2563EB)
             )
         }
 
@@ -1716,6 +1830,8 @@ private fun decodeBitmapFromUriString(
         }
     }
 }
+
+
 
 
 
