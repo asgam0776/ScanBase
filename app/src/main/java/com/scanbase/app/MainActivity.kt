@@ -196,6 +196,7 @@ fun ScanBaseApp(
     var cropCorners by remember { mutableStateOf<DocumentCorners?>(null) }
     var cropImagePath by remember { mutableStateOf<String?>(null) }
     var cropMessage by remember { mutableStateOf<String?>(null) }
+    var resultImagePath by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(importedImagePath) {
         importedImagePath?.let { imagePath ->
@@ -205,6 +206,7 @@ fun ScanBaseApp(
             cropImagePath = null
             cropViewModel.resetIfImageChanged(imagePath)
             cropMessage = null
+            resultImagePath = null
             onImportedImageHandled()
             navController.navigate(Screen.Preview.route)
         }
@@ -246,6 +248,7 @@ fun ScanBaseApp(
                     cropImagePath = null
                     cropViewModel.resetIfImageChanged(imagePath)
                     cropMessage = null
+                    resultImagePath = null
                     navController.navigate(Screen.Preview.route)
                 }
             )
@@ -400,14 +403,37 @@ fun ScanBaseApp(
                             cropMessage = null
                             cropCorners = latestCorners
                             cropImagePath = imagePath
+                            resultImagePath = processedPath
                             previewImagePath = processedPath
-                            navController.navigateUp()
+                            navController.navigate(Screen.ResultPreview.route)
                         }
                     }
                 }
             )
         }
-    }
+
+        composable(Screen.ResultPreview.route) {
+            ResultPreviewScreen(
+                imagePath = resultImagePath,
+                onBackClick = navController::navigateUp,
+                onAddPageClick = {
+                    resultImagePath?.let { imagePath ->
+                        val page = ScanPage(
+                            id = System.currentTimeMillis(),
+                            imagePath = imagePath,
+                            createdAtMillis = System.currentTimeMillis()
+                        )
+                        scanDocument = scanDocument.copy(
+                            pages = scanDocument.pages + page
+                        )
+                        selectedPageId = page.id
+                        savedPdfPath = null
+                        documentMessage = null
+                    }
+                    navController.navigate(Screen.DocumentPreview.route)
+                }
+            )
+        }    }
 }
 
 private sealed class Screen(val route: String) {
@@ -417,6 +443,7 @@ private sealed class Screen(val route: String) {
     data object Preview : Screen("preview")
     data object DocumentPreview : Screen("document_preview")
     data object Crop : Screen("crop")
+    data object ResultPreview : Screen("result_preview")
 }
 
 @Composable
@@ -621,6 +648,58 @@ fun PreviewScreen(
     }
 }
 
+@Composable
+fun ResultPreviewScreen(
+    imagePath: String?,
+    onBackClick: () -> Unit,
+    onAddPageClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF7F8FA))
+            .padding(horizontal = 20.dp, vertical = 24.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BackButton(onClick = onBackClick)
+            BasicText(
+                text = "보정 결과",
+                style = TextStyle(
+                    color = Color(0xFF111827),
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 58.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        if (imagePath == null) {
+            PlaceholderContent(
+                title = "이미지 없음",
+                message = "보정된 이미지가 없습니다."
+            )
+        } else {
+            ImagePreviewArea(
+                imagePath = imagePath,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            ActionButton(text = "페이지에 추가", onClick = onAddPageClick)
+        }
+    }
+}
 @Composable
 fun CropScreen(
     imagePath: String?,
@@ -1369,6 +1448,9 @@ private fun decodeBitmapFromUriString(
         }
     }
 }
+
+
+
 
 
 

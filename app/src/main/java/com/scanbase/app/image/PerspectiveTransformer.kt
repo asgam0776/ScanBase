@@ -21,14 +21,10 @@ import kotlin.math.max
 
 object PerspectiveTransformer {
     private const val Tag = "PerspectiveTransformer"
-    private const val MinOutputSide = 120
+    private const val MinOutputSide = 100
     private const val MinAreaRatio = 0.02
 
-    fun transformToCache(
-        context: Context,
-        sourceBitmap: Bitmap,
-        corners: DocumentCorners
-    ): Uri? {
+    fun transform(sourceBitmap: Bitmap, corners: DocumentCorners): Bitmap? {
         if (!isValidSelection(sourceBitmap, corners)) {
             Log.d(Tag, "invalid selection corners=$corners")
             return null
@@ -57,9 +53,9 @@ object PerspectiveTransformer {
             )
             destinationPoints.fromArray(
                 Point(0.0, 0.0),
-                Point((outputSize.width - 1).toDouble(), 0.0),
-                Point((outputSize.width - 1).toDouble(), (outputSize.height - 1).toDouble()),
-                Point(0.0, (outputSize.height - 1).toDouble())
+                Point(outputSize.width.toDouble(), 0.0),
+                Point(outputSize.width.toDouble(), outputSize.height.toDouble()),
+                Point(0.0, outputSize.height.toDouble())
             )
 
             perspectiveMatrix = Imgproc.getPerspectiveTransform(sourcePoints, destinationPoints)
@@ -74,14 +70,13 @@ object PerspectiveTransformer {
                 Log.d(Tag, "warpPerspective returned empty mat")
                 null
             } else {
-                val resultBitmap = Bitmap.createBitmap(
+                Bitmap.createBitmap(
                     destinationMat.cols(),
                     destinationMat.rows(),
                     Bitmap.Config.ARGB_8888
-                )
-                Utils.matToBitmap(destinationMat, resultBitmap)
-                saveBitmapToCache(context, resultBitmap).also {
-                    resultBitmap.recycle()
+                ).also { resultBitmap ->
+                    Utils.matToBitmap(destinationMat, resultBitmap)
+                    Log.d(Tag, "result bitmap width=${resultBitmap.width} height=${resultBitmap.height}")
                 }
             }
         } catch (exception: Exception) {
@@ -93,6 +88,19 @@ object PerspectiveTransformer {
             perspectiveMatrix?.release()
             sourcePoints.release()
             destinationPoints.release()
+        }
+    }
+
+    fun transformToCache(
+        context: Context,
+        sourceBitmap: Bitmap,
+        corners: DocumentCorners
+    ): Uri? {
+        val resultBitmap = transform(sourceBitmap, corners) ?: return null
+        return try {
+            saveBitmapToCache(context, resultBitmap)
+        } finally {
+            resultBitmap.recycle()
         }
     }
 
@@ -128,6 +136,7 @@ object PerspectiveTransformer {
             file.outputStream().use { output ->
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)
             }
+            Log.d(Tag, "saved processed image path=${file.absolutePath} width=${bitmap.width} height=${bitmap.height}")
             Uri.fromFile(file)
         }.getOrNull()
     }
