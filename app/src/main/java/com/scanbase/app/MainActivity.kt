@@ -78,6 +78,8 @@ import com.scanbase.app.image.DocumentDetector
 import com.scanbase.app.image.EnhanceMode
 import com.scanbase.app.image.ImageEnhancer
 import com.scanbase.app.image.ImageFileNormalizer
+import com.scanbase.app.image.ImageQualityAnalyzer
+import com.scanbase.app.image.QualityResult
 import com.scanbase.app.image.OpenCvRuntime
 import com.scanbase.app.image.PerspectiveTransformer
 import com.scanbase.app.pdf.PdfExporter
@@ -776,6 +778,22 @@ fun PreviewScreen(
     onAddPageClick: () -> Unit,
     onCropClick: () -> Unit
 ) {
+    val context = LocalContext.current
+    var qualityResult by remember(imagePath) { mutableStateOf<QualityResult?>(null) }
+
+    LaunchedEffect(imagePath) {
+        qualityResult = null
+        imagePath?.let { path ->
+            decodeBitmapFromUriString(context, path)?.let { bitmap ->
+                try {
+                    qualityResult = ImageQualityAnalyzer.analyze(bitmap)
+                } finally {
+                    bitmap.recycle()
+                }
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -815,6 +833,8 @@ fun PreviewScreen(
                     .fillMaxWidth()
                     .weight(1f)
             )
+
+            QualityWarnings(result = qualityResult)
 
             Spacer(modifier = Modifier.height(18.dp))
 
@@ -1005,7 +1025,22 @@ fun CropScreen(
     onFineTuneCorner: (Float, Float) -> Unit,
     onApplyClick: () -> Unit
 ) {
+    val context = LocalContext.current
     var showDebugCorners by rememberSaveable { mutableStateOf(false) }
+    var qualityResult by remember(imagePath) { mutableStateOf<QualityResult?>(null) }
+
+    LaunchedEffect(imagePath) {
+        qualityResult = null
+        imagePath?.let { path ->
+            decodeBitmapFromUriString(context, path)?.let { bitmap ->
+                try {
+                    qualityResult = ImageQualityAnalyzer.analyze(bitmap)
+                } finally {
+                    bitmap.recycle()
+                }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1056,6 +1091,11 @@ fun CropScreen(
             } else {
                 Spacer(modifier = Modifier.height(6.dp))
             }
+            QualityWarnings(result = qualityResult, compact = true)
+            if (qualityResult?.warnings?.isNotEmpty() == true) {
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+
 
             if (cropState.selectedCorner != null) {
                 FineTuneControls(
@@ -1645,6 +1685,23 @@ private fun PlaceholderContent(
 }
 
 @Composable
+private fun QualityWarnings(
+    result: QualityResult?,
+    compact: Boolean = false
+) {
+    val warnings = result?.warnings.orEmpty()
+    if (warnings.isEmpty()) return
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp)
+    ) {
+        warnings.forEach { warning ->
+            NoticeText(text = warning)
+        }
+    }
+}
+@Composable
 private fun NoticeText(text: String) {
     BasicText(
         text = text,
@@ -1830,6 +1887,7 @@ private fun decodeBitmapFromUriString(
         }
     }
 }
+
 
 
 
