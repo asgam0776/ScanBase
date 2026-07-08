@@ -1,13 +1,19 @@
-package com.scanbase.app.camera
+﻿package com.scanbase.app.camera
 
 import android.content.Context
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.util.Log
+import android.view.Surface
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -47,10 +53,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.scanbase.app.BackButton
+import com.scanbase.app.image.ImageFileNormalizer
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.Executor
+import kotlinx.coroutines.delay
+
+private const val CameraTag = "CameraCaptureScreen"
 
 @Composable
 fun CameraCaptureScreen(
@@ -142,7 +152,8 @@ private fun CameraPreviewContent(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FIT_CENTER
         }
     }
 
@@ -153,24 +164,60 @@ private fun CameraPreviewContent(
 
     LaunchedEffect(previewView) {
         val provider = ProcessCameraProvider.getInstance(context).get()
+        val targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
         val preview = Preview.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetRotation(targetRotation)
             .build()
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
         val capture = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetRotation(targetRotation)
             .setJpegQuality(100)
             .build()
 
         try {
             provider.unbindAll()
+            previewView.scaleType = PreviewView.ScaleType.FIT_CENTER
+
+            var viewPort = previewView.viewPort
+            repeat(10) {
+                if (viewPort == null) {
+                    delay(50)
+                    viewPort = previewView.viewPort
+                }
+            }
+            Log.d(CameraTag, "PreviewView viewPort isNull=${viewPort == null} viewPort=$viewPort")
+
+            if (viewPort == null) {
+                errorMessage = "카메라 화면 준비 중입니다. 다시 시도해주세요."
+                Log.d(CameraTag, "UseCaseGroup not bound because viewPort is null")
+                return@LaunchedEffect
+            }
+
+            val useCaseGroup = UseCaseGroup.Builder()
+                .addUseCase(preview)
+                .addUseCase(capture)
+                .setViewPort(viewPort!!)
+                .build()
+
             camera = provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                capture
+                useCaseGroup
             )
             imageCapture = capture
-        } catch (_: Exception) {
+            Log.d(
+                CameraTag,
+                "UseCaseGroup bound=true PreviewView scaleType=${previewView.scaleType} " +
+                    "previewViewPort=$viewPort " +
+                    "previewTargetAspectRatio=${AspectRatio.RATIO_4_3} " +
+                    "imageCaptureTargetAspectRatio=${AspectRatio.RATIO_4_3} " +
+                    "previewTargetRotation=$targetRotation imageCaptureTargetRotation=${capture.targetRotation}"
+            )
+        } catch (exception: Exception) {
+            Log.d(CameraTag, "camera bind failed", exception)
             errorMessage = "카메라를 시작할 수 없습니다."
         }
     }
@@ -187,7 +234,15 @@ private fun CameraPreviewContent(
             .background(Color.Black)
     ) {
         AndroidView(
-            factory = { previewView },
+            factory = {
+                previewView.apply {
+                    scaleType = PreviewView.ScaleType.FIT_CENTER
+                }
+            },
+            update = { view ->
+                view.scaleType = PreviewView.ScaleType.FIT_CENTER
+                Log.d(CameraTag, "AndroidView update PreviewView scaleType=${view.scaleType}")
+            },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -281,19 +336,49 @@ private fun takePhoto(
     val imageFile = createCacheImageFile(context)
     val outputOptions = ImageCapture.OutputFileOptions.Builder(imageFile).build()
 
+    Log.d(CameraTag, "takePhoto imageCaptureTargetRotation=${imageCapture.targetRotation}")
     imageCapture.takePicture(
         outputOptions,
         executor,
         object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                onSuccess(imageFile.absolutePath)
+                val sourceUri = Uri.fromFile(imageFile)
+                Log.d(CameraTag, "capture sourceUri=$sourceUri")
+                val normalizedUri = ImageFileNormalizer.normalizeToCache(
+                    context = context,
+                    sourceUri = sourceUri,
+                    forcePortraitIfExifNormal = true
+                )
+                if (normalizedUri == null) {
+                    onError()
+                } else {
+                    logImageSize(context, normalizedUri, "capture normalized image")
+                    Log.d(CameraTag, "capture normalizedUri=$normalizedUri")
+                    imageFile.delete()
+                    onSuccess(normalizedUri.toString())
+                }
             }
 
             override fun onError(exception: ImageCaptureException) {
+                Log.d(CameraTag, "capture failed", exception)
                 onError()
             }
         }
     )
+}
+
+private fun logImageSize(context: Context, uri: Uri, label: String) {
+    val options = BitmapFactory.Options().apply {
+        inJustDecodeBounds = true
+    }
+    if (uri.scheme == "file") {
+        BitmapFactory.decodeFile(uri.path, options)
+    } else {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, options)
+        }
+    }
+    Log.d(CameraTag, "$label width=${options.outWidth} height=${options.outHeight}")
 }
 
 private fun createCacheImageFile(context: Context): File {
@@ -392,3 +477,5 @@ private fun TextButton(
             .padding(vertical = 16.dp)
     )
 }
+
+

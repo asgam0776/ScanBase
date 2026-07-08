@@ -1,4 +1,4 @@
-plugins {
+﻿plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.android.application")
 }
@@ -54,8 +54,10 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
+    implementation("androidx.exifinterface:exifinterface:1.3.2")
     implementation("androidx.compose.ui:ui:1.7.2")
     implementation("androidx.compose.foundation:foundation:1.7.2")
     implementation("androidx.compose.foundation:foundation-layout:1.7.2")
     implementation("org.opencv:opencv:4.10.0")
+    testImplementation("junit:junit:4.13.2")
 }

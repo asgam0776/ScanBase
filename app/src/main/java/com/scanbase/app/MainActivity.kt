@@ -1,18 +1,23 @@
-package com.scanbase.app
+﻿package com.scanbase.app
 
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.graphics.PointF
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +30,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
@@ -32,13 +38,17 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
@@ -46,20 +56,38 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.core.content.ContextCompat
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.scanbase.app.camera.CameraCaptureScreen
+import com.scanbase.app.crop.CropCorner
+import com.scanbase.app.crop.CropState
+import com.scanbase.app.crop.CropViewModel
+import com.scanbase.app.crop.insetFallbackCorners
+import com.scanbase.app.crop.pointFor
+import com.scanbase.app.data.DocumentCorners
 import com.scanbase.app.data.ScanDocument
 import com.scanbase.app.data.ScanPage
+import com.scanbase.app.image.CropCoordinateMapper
+import com.scanbase.app.image.CropPoint
+import com.scanbase.app.image.DocumentDetector
+import com.scanbase.app.image.ImageFileNormalizer
 import com.scanbase.app.image.OpenCvRuntime
+import com.scanbase.app.image.PerspectiveTransformer
 import com.scanbase.app.pdf.PdfExporter
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.math.hypot
+
+private const val AppTag = "ScanBaseImageFlow"
 
 class MainActivity : ComponentActivity() {
+    private val cropViewModel by viewModels<CropViewModel>()
     private var hasCameraPermission by mutableStateOf(false)
     private var importedImagePath by mutableStateOf<String?>(null)
     private var galleryMessage by mutableStateOf<String?>(null)
@@ -78,11 +106,14 @@ class MainActivity : ComponentActivity() {
             return@registerForActivityResult
         }
 
-        val copiedPath = copyPickedImageToCache(uri)
-        if (copiedPath == null) {
+        Log.d(AppTag, "gallery sourceUri=$uri")
+        val normalizedUri = ImageFileNormalizer.normalizeToCache(this, uri)
+        Log.d(AppTag, "gallery normalizedUri=$normalizedUri")
+
+        if (normalizedUri == null) {
             galleryMessage = "\uC774\uBBF8\uC9C0\uB97C \uAC00\uC838\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
         } else {
-            importedImagePath = copiedPath
+            importedImagePath = normalizedUri.toString()
             galleryMessage = null
         }
     }
@@ -102,7 +133,8 @@ class MainActivity : ComponentActivity() {
                         onRequestCameraPermission = ::requestCameraPermission,
                         onPickGalleryImage = ::pickGalleryImage,
                         onImportedImageHandled = { importedImagePath = null },
-                        onGalleryMessageShown = { galleryMessage = null }
+                        onGalleryMessageShown = { galleryMessage = null },
+                        cropViewModel = cropViewModel
                     )
                 }
             }
@@ -150,7 +182,8 @@ fun ScanBaseApp(
     onRequestCameraPermission: () -> Unit,
     onPickGalleryImage: () -> Unit,
     onImportedImageHandled: () -> Unit,
-    onGalleryMessageShown: () -> Unit
+    onGalleryMessageShown: () -> Unit,
+    cropViewModel: CropViewModel
 ) {
     val context = LocalContext.current
     val navController = rememberNavController()
@@ -160,10 +193,18 @@ fun ScanBaseApp(
     var homeMessage by remember { mutableStateOf<String?>(null) }
     var documentMessage by remember { mutableStateOf<String?>(null) }
     var savedPdfPath by remember { mutableStateOf<String?>(null) }
+    var cropCorners by remember { mutableStateOf<DocumentCorners?>(null) }
+    var cropImagePath by remember { mutableStateOf<String?>(null) }
+    var cropMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(importedImagePath) {
         importedImagePath?.let { imagePath ->
+            Log.d(AppTag, "PreviewScreen from gallery normalizedUri=$imagePath")
             previewImagePath = imagePath
+            cropCorners = null
+            cropImagePath = null
+            cropViewModel.resetIfImageChanged(imagePath)
+            cropMessage = null
             onImportedImageHandled()
             navController.navigate(Screen.Preview.route)
         }
@@ -199,7 +240,12 @@ fun ScanBaseApp(
                 onRequestCameraPermission = onRequestCameraPermission,
                 onBackClick = navController::navigateUp,
                 onImageCaptured = { imagePath ->
+                    Log.d(AppTag, "PreviewScreen from camera normalizedUri=$imagePath")
                     previewImagePath = imagePath
+                    cropCorners = null
+                    cropImagePath = null
+                    cropViewModel.resetIfImageChanged(imagePath)
+                    cropMessage = null
                     navController.navigate(Screen.Preview.route)
                 }
             )
@@ -228,7 +274,31 @@ fun ScanBaseApp(
                     }
                     navController.navigate(Screen.DocumentPreview.route)
                 },
-                onCropClick = { navController.navigate(Screen.Crop.route) }
+                onCropClick = {
+                    val imagePath = previewImagePath
+                    Log.d(AppTag, "CropScreen normalizedUri=$imagePath")
+                    if (imagePath != null) {
+                        cropViewModel.resetIfImageChanged(imagePath)
+                        if (!cropViewModel.state.isInitialized) {
+                            decodeBitmapFromUriString(context, imagePath)?.let { bitmap ->
+                                try {
+                                    val detectedCorners = DocumentDetector.detect(bitmap)
+                                    cropViewModel.initialize(
+                                        imageUri = imagePath,
+                                        bitmapWidth = bitmap.width,
+                                        bitmapHeight = bitmap.height,
+                                        detectedCorners = detectedCorners
+                                    )
+                                    cropCorners = detectedCorners
+                                    cropImagePath = imagePath
+                                } finally {
+                                    bitmap.recycle()
+                                }
+                            }
+                        }
+                    }
+                    navController.navigate(Screen.Crop.route)
+                }
             )
         }
         composable(Screen.DocumentPreview.route) {
@@ -293,7 +363,49 @@ fun ScanBaseApp(
             )
         }
         composable(Screen.Crop.route) {
-            CropScreen(onBackClick = navController::navigateUp)
+            CropScreen(
+                imagePath = previewImagePath,
+                cropState = cropViewModel.state,
+                message = cropMessage,
+                onBackClick = navController::navigateUp,
+                onSelectCorner = cropViewModel::setSelectedCorner,
+                onUpdateCorner = cropViewModel::updateCorner,
+                onFineTuneCorner = cropViewModel::moveSelectedCorner,
+                onApplyClick = {
+                    val imagePath = previewImagePath
+                    val latestCorners = cropViewModel.latestUserCorners()
+                    if (imagePath == null || latestCorners == null) {
+                        cropMessage = "선택 영역을 보정할 수 없습니다. 코너를 다시 조정해주세요."
+                    } else {
+                        val processedUri = decodeBitmapFromUriString(context, imagePath)?.let { bitmap ->
+                            try {
+                                PerspectiveTransformer.transformToCache(
+                                    context = context,
+                                    sourceBitmap = bitmap,
+                                    corners = latestCorners
+                                )
+                            } finally {
+                                bitmap.recycle()
+                            }
+                        }
+
+                        if (processedUri == null) {
+                            cropMessage = "선택 영역을 보정할 수 없습니다. 코너를 다시 조정해주세요."
+                        } else {
+                            val processedPath = processedUri.toString()
+                            Log.d(
+                                AppTag,
+                                "CropScreen apply latest userCorners=$latestCorners processedPath=$processedPath"
+                            )
+                            cropMessage = null
+                            cropCorners = latestCorners
+                            cropImagePath = imagePath
+                            previewImagePath = processedPath
+                            navController.navigateUp()
+                        }
+                    }
+                }
+            )
         }
     }
 }
@@ -510,14 +622,336 @@ fun PreviewScreen(
 }
 
 @Composable
-fun CropScreen(onBackClick: () -> Unit) {
-    PlaceholderScreen(
-        title = "\uC790\uB974\uAE30/\uBCF4\uC815",
-        message = "\uC790\uB974\uAE30\uC640 \uBCF4\uC815\uC740 \uB2E4\uC74C \uB2E8\uACC4\uC5D0\uC11C \uAD6C\uD604\uD569\uB2C8\uB2E4.",
-        onBackClick = onBackClick
+fun CropScreen(
+    imagePath: String?,
+    cropState: CropState,
+    message: String?,
+    onBackClick: () -> Unit,
+    onSelectCorner: (CropCorner?) -> Unit,
+    onUpdateCorner: (CropCorner, PointF) -> Unit,
+    onFineTuneCorner: (Float, Float) -> Unit,
+    onApplyClick: () -> Unit
+) {
+    var showDebugCorners by rememberSaveable { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF7F8FA))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BackButton(onClick = onBackClick)
+            BasicText(
+                text = "\uC790\uB974\uAE30/\uBCF4\uC815",
+                style = TextStyle(
+                    color = Color(0xFF111827),
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 58.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        if (imagePath == null) {
+            PlaceholderContent(
+                title = "\uC774\uBBF8\uC9C0 \uC5C6\uC74C",
+                message = "\uD14C\uB450\uB9AC\uB97C \uAC10\uC9C0\uD560 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."
+            )
+        } else {
+            CropImageWithCorners(
+                imagePath = imagePath,
+                cropState = cropState,
+                onSelectCorner = onSelectCorner,
+                onUpdateCorner = onUpdateCorner,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+
+            if (message != null) {
+                NoticeText(text = message)
+                Spacer(modifier = Modifier.height(6.dp))
+            } else {
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+
+            if (cropState.selectedCorner != null) {
+                FineTuneControls(
+                    selectedCorner = cropState.selectedCorner,
+                    onMove = onFineTuneCorner
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+
+            ActionButton(
+                text = "\uC801\uC6A9",
+                onClick = onApplyClick
+            )
+
+            cropState.userCorners?.let { corners ->
+                Spacer(modifier = Modifier.height(6.dp))
+                SmallActionButton(
+                    text = if (showDebugCorners) "좌표 숨기기" else "좌표 보기",
+                    enabled = true,
+                    onClick = { showDebugCorners = !showDebugCorners },
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = Color(0xFF6B7280)
+                )
+                if (showDebugCorners) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    DebugCornerText(corners = corners)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CropImageWithCorners(
+    imagePath: String,
+    cropState: CropState,
+    onSelectCorner: (CropCorner?) -> Unit,
+    onUpdateCorner: (CropCorner, PointF) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val bitmap = remember(imagePath) {
+        decodeBitmapFromUriString(context, imagePath)
+    }
+    var boxWidth by remember { mutableStateOf(0) }
+    var boxHeight by remember { mutableStateOf(0) }
+    var activeCorner by remember { mutableStateOf<CropCorner?>(null) }
+    val latestCorners by rememberUpdatedState(cropState.userCorners)
+    val latestMapper by rememberUpdatedState(
+        if (bitmap != null && boxWidth > 0 && boxHeight > 0) {
+            CropCoordinateMapper(
+                bitmapWidth = bitmap.width.toFloat(),
+                bitmapHeight = bitmap.height.toFloat(),
+                containerWidth = boxWidth.toFloat(),
+                containerHeight = boxHeight.toFloat()
+            )
+        } else {
+            null
+        }
+    )
+    val touchRadiusPx = with(density) { 56.dp.toPx() }
+
+    if (bitmap == null) {
+        BasicText(
+            text = "\uC774\uBBF8\uC9C0\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",
+            style = TextStyle(
+                color = Color(0xFFB91C1C),
+                fontSize = 17.sp,
+                textAlign = TextAlign.Center
+            ),
+            modifier = modifier.fillMaxWidth()
+        )
+        return
+    }
+
+    val currentCorners = cropState.userCorners ?: insetFallbackCorners(bitmap.width, bitmap.height)
+    val mapper = latestMapper
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.Black)
+            .onSizeChanged { size ->
+                boxWidth = size.width
+                boxHeight = size.height
+            }
+            .pointerInput(bitmap.width, bitmap.height, touchRadiusPx) {
+                detectDragGestures(
+                    onDragStart = { touchPoint ->
+                        val activeMapper = latestMapper ?: return@detectDragGestures
+                        val activeCorners = latestCorners ?: return@detectDragGestures
+                        activeCorner = findNearestCorner(
+                            corners = activeCorners,
+                            mapper = activeMapper,
+                            touchPoint = touchPoint,
+                            radiusPx = touchRadiusPx
+                        )
+                        onSelectCorner(activeCorner)
+                        activeCorner?.let { corner ->
+                            val point = activeCorners.pointFor(corner)
+                            Log.d(AppTag, "CropScreen dragStart corner=${corner.logName} x=${point.x} y=${point.y}")
+                        }
+                    },
+                    onDrag = { change, dragAmount ->
+                        val corner = activeCorner
+                        val activeMapper = latestMapper
+                        val activeCorners = latestCorners
+                        if (corner != null && activeMapper != null && activeCorners != null) {
+                            val bitmapDelta = activeMapper.screenDeltaToBitmapDelta(
+                                CropPoint(dragAmount.x, dragAmount.y)
+                            )
+                            val currentPoint = activeCorners.pointFor(corner)
+                            val nextPoint = activeMapper.clampBitmapPoint(
+                                CropPoint(
+                                    x = currentPoint.x + bitmapDelta.x,
+                                    y = currentPoint.y + bitmapDelta.y
+                                )
+                            )
+                            onUpdateCorner(corner, PointF(nextPoint.x, nextPoint.y))
+                            change.consume()
+                        }
+                    },
+                    onDragEnd = {
+                        activeCorner?.let { corner ->
+                            val point = latestCorners?.pointFor(corner)
+                            Log.d(AppTag, "CropScreen dragEnd corner=${corner.logName} x=${point?.x} y=${point?.y}")
+                        }
+                        activeCorner = null
+                    },
+                    onDragCancel = {
+                        Log.d(AppTag, "CropScreen dragCancel")
+                        activeCorner = null
+                    }
+                )
+            }
+    ) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "\uC120\uD0DD\uD55C \uC774\uBBF8\uC9C0",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.matchParentSize()
+        )
+
+        if (mapper != null) {
+            Canvas(modifier = Modifier.matchParentSize()) {
+                fun mapPoint(point: PointF): Offset {
+                    val screenPoint = mapper.bitmapToScreen(CropPoint(point.x, point.y))
+                    return Offset(screenPoint.x, screenPoint.y)
+                }
+
+                val topLeft = mapPoint(currentCorners.topLeft)
+                val topRight = mapPoint(currentCorners.topRight)
+                val bottomRight = mapPoint(currentCorners.bottomRight)
+                val bottomLeft = mapPoint(currentCorners.bottomLeft)
+                val lineColor = Color(0xFFFFD400)
+                val pointColor = Color(0xFFFF3B30)
+                val selectedPointColor = Color(0xFF00E5FF)
+                val lineWidth = 8f
+                val pointRadius = 18f
+                val selectedPointRadius = 25f
+
+                drawLine(lineColor, topLeft, topRight, strokeWidth = lineWidth)
+                drawLine(lineColor, topRight, bottomRight, strokeWidth = lineWidth)
+                drawLine(lineColor, bottomRight, bottomLeft, strokeWidth = lineWidth)
+                drawLine(lineColor, bottomLeft, topLeft, strokeWidth = lineWidth)
+
+                listOf(
+                    CropCorner.TopLeft to topLeft,
+                    CropCorner.TopRight to topRight,
+                    CropCorner.BottomRight to bottomRight,
+                    CropCorner.BottomLeft to bottomLeft
+                ).forEach { (corner, point) ->
+                    val isSelected = corner == cropState.selectedCorner || corner == activeCorner
+                    val radius = if (isSelected) selectedPointRadius else pointRadius
+                    if (isSelected) {
+                        val crosshairSize = 44f
+                        drawLine(
+                            Color.White,
+                            Offset(point.x - crosshairSize, point.y),
+                            Offset(point.x + crosshairSize, point.y),
+                            strokeWidth = 3f
+                        )
+                        drawLine(
+                            Color.White,
+                            Offset(point.x, point.y - crosshairSize),
+                            Offset(point.x, point.y + crosshairSize),
+                            strokeWidth = 3f
+                        )
+                    }
+                    drawCircle(Color.White, radius + 6f, point)
+                    drawCircle(if (isSelected) selectedPointColor else pointColor, radius, point)
+                    drawCircle(
+                        color = Color.Black,
+                        radius = radius + 6f,
+                        center = point,
+                        style = Stroke(width = 3f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FineTuneControls(
+    selectedCorner: CropCorner,
+    onMove: (Float, Float) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        BasicText(
+            text = "\uC120\uD0DD\uB41C \uCF54\uB108: ${selectedCorner.logName}",
+            style = TextStyle(
+                color = Color(0xFF374151),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SmallActionButton(text = "\u25B2", enabled = true, onClick = { onMove(0f, -3f) }, modifier = Modifier.weight(1f))
+            SmallActionButton(text = "\u25BC", enabled = true, onClick = { onMove(0f, 3f) }, modifier = Modifier.weight(1f))
+            SmallActionButton(text = "\u25C0", enabled = true, onClick = { onMove(-3f, 0f) }, modifier = Modifier.weight(1f))
+            SmallActionButton(text = "\u25B6", enabled = true, onClick = { onMove(3f, 0f) }, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun DebugCornerText(corners: DocumentCorners) {
+    BasicText(
+        text = "topLeft(${corners.topLeft.x.toInt()}, ${corners.topLeft.y.toInt()})  " +
+            "topRight(${corners.topRight.x.toInt()}, ${corners.topRight.y.toInt()})\n" +
+            "bottomRight(${corners.bottomRight.x.toInt()}, ${corners.bottomRight.y.toInt()})  " +
+            "bottomLeft(${corners.bottomLeft.x.toInt()}, ${corners.bottomLeft.y.toInt()})",
+        style = TextStyle(
+            color = Color(0xFF6B7280),
+            fontSize = 11.sp,
+            textAlign = TextAlign.Center
+        ),
+        modifier = Modifier.fillMaxWidth()
     )
 }
 
+private fun findNearestCorner(
+    corners: DocumentCorners,
+    mapper: CropCoordinateMapper,
+    touchPoint: Offset,
+    radiusPx: Float
+): CropCorner? {
+    return CropCorner.entries
+        .map { corner ->
+            val point = corners.pointFor(corner)
+            val screenPoint = mapper.bitmapToScreen(CropPoint(point.x, point.y))
+            val distance = hypot(
+                (screenPoint.x - touchPoint.x).toDouble(),
+                (screenPoint.y - touchPoint.y).toDouble()
+            ).toFloat()
+            corner to distance
+        }
+        .filter { (_, distance) -> distance <= radiusPx }
+        .minByOrNull { (_, distance) -> distance }
+        ?.first
+}
 @Composable
 private fun DocumentPageManager(
     document: ScanDocument,
@@ -668,8 +1102,9 @@ private fun ImagePreviewArea(
     imagePath: String,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val bitmap = remember(imagePath) {
-        BitmapFactory.decodeFile(imagePath)
+        decodeBitmapFromUriString(context, imagePath)
     }
 
     if (bitmap == null) {
@@ -762,6 +1197,25 @@ private fun NoticeText(text: String) {
             .clip(RoundedCornerShape(10.dp))
             .background(Color(0xFFFFF7ED))
             .padding(12.dp)
+    )
+}
+
+@Composable
+private fun CornerText(
+    label: String,
+    x: Float,
+    y: Float
+) {
+    BasicText(
+        text = "$label: (${x.toInt()}, ${y.toInt()})",
+        style = TextStyle(
+            color = Color(0xFF374151),
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
     )
 }
 
@@ -901,3 +1355,27 @@ private fun movePage(
         add(targetIndex, page)
     }
 }
+
+private fun decodeBitmapFromUriString(
+    context: Context,
+    uriString: String
+): android.graphics.Bitmap? {
+    val uri = Uri.parse(uriString)
+    return if (uri.scheme == "file") {
+        BitmapFactory.decodeFile(uri.path)
+    } else {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input)
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+

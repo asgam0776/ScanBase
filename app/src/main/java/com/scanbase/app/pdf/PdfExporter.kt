@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.pdf.PdfDocument
+import android.net.Uri
 import android.os.Environment
 import androidx.core.content.FileProvider
 import com.scanbase.app.data.ScanDocument
@@ -42,7 +43,7 @@ object PdfExporter {
                 val canvas = pdfPage.canvas
 
                 canvas.drawColor(Color.WHITE)
-                val bitmap = BitmapFactory.decodeFile(page.imagePath)
+                val bitmap = decodeBitmap(context, page.imagePath)
                 if (bitmap != null) {
                     val targetRect = fitCenterRect(
                         imageWidth = bitmap.width.toFloat(),
@@ -86,6 +87,17 @@ object PdfExporter {
             Intent.createChooser(intent, "\u0050\u0044\u0046 \uACF5\uC720")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
+    }
+
+    private fun decodeBitmap(context: Context, uriString: String): android.graphics.Bitmap? {
+        val uri = Uri.parse(uriString)
+        return if (uri.scheme == "file") {
+            BitmapFactory.decodeFile(uri.path)
+        } else {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                BitmapFactory.decodeStream(input)
+            }
+        }
     }
 
     private fun fitCenterRect(
