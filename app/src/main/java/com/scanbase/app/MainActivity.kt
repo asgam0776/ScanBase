@@ -7,8 +7,6 @@ import android.graphics.BitmapFactory
 import android.graphics.PointF
 import android.net.Uri
 import android.os.Bundle
-import android.util.Log
-import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
 import androidx.activity.result.PickVisualMediaRequest
@@ -70,8 +68,11 @@ import com.scanbase.app.crop.CropViewModel
 import com.scanbase.app.crop.insetFallbackCorners
 import com.scanbase.app.crop.pointFor
 import com.scanbase.app.data.DocumentCorners
+import com.scanbase.app.data.DocumentRecord
 import com.scanbase.app.data.ScanDocument
 import com.scanbase.app.data.ScanPage
+import com.scanbase.app.document.DeleteResult
+import com.scanbase.app.document.DocumentRecordStore
 import com.scanbase.app.image.CropCoordinateMapper
 import com.scanbase.app.image.CropPoint
 import com.scanbase.app.image.DocumentDetector
@@ -84,8 +85,6 @@ import com.scanbase.app.image.OpenCvRuntime
 import com.scanbase.app.image.PerspectiveTransformer
 import com.scanbase.app.pdf.PdfExporter
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Locale
 import kotlin.math.hypot
 
 private const val AppTag = "ScanBaseImageFlow"
@@ -110,9 +109,7 @@ class MainActivity : ComponentActivity() {
             return@registerForActivityResult
         }
 
-        Log.d(AppTag, "gallery sourceUri=$uri")
         val normalizedUri = ImageFileNormalizer.normalizeToCache(this, uri)
-        Log.d(AppTag, "gallery normalizedUri=$normalizedUri")
 
         if (normalizedUri == null) {
             galleryMessage = "\uC774\uBBF8\uC9C0\uB97C \uAC00\uC838\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
@@ -162,20 +159,6 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun copyPickedImageToCache(uri: Uri): String? {
-        return runCatching {
-            val extension = resolveImageExtension(this, uri)
-            val imageFile = createGalleryCacheFile(this, extension)
-
-            contentResolver.openInputStream(uri)?.use { input ->
-                imageFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            } ?: return null
-
-            imageFile.absolutePath
-        }.getOrNull()
-    }
 }
 
 @Composable
@@ -201,12 +184,19 @@ fun ScanBaseApp(
     var cropImagePath by remember { mutableStateOf<String?>(null) }
     var cropMessage by remember { mutableStateOf<String?>(null) }
     var resultImagePath by remember { mutableStateOf<String?>(null) }
+    val documentRecordStore = remember { DocumentRecordStore(context) }
+    var recentDocuments by remember { mutableStateOf<List<DocumentRecord>>(emptyList()) }
+    var recentMessage by remember { mutableStateOf<String?>(null) }
+    var pendingDeleteRecord by remember { mutableStateOf<DocumentRecord?>(null) }
     var editingPageId by remember { mutableStateOf<Long?>(null) }
     var selectedPageShowOriginal by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) {
+        recentDocuments = documentRecordStore.load()
+    }
+
     LaunchedEffect(importedImagePath) {
         importedImagePath?.let { imagePath ->
-            Log.d(AppTag, "PreviewScreen from gallery normalizedUri=$imagePath replacePageId=$editingPageId")
             previewImagePath = imagePath
             cropCorners = null
             cropImagePath = null
@@ -267,7 +257,10 @@ fun ScanBaseApp(
                     editingPageId = null
                     onPickGalleryImage()
                 },
-                onRecentDocumentsClick = { navController.navigate(Screen.DocumentPreview.route) }
+                onRecentDocumentsClick = {
+                    recentDocuments = documentRecordStore.load()
+                    navController.navigate(Screen.RecentDocuments.route)
+                }
             )
         }
         composable(Screen.Camera.route) {
@@ -283,7 +276,6 @@ fun ScanBaseApp(
                     navController.navigateUp()
                 },
                 onImageCaptured = { imagePath ->
-                    Log.d(AppTag, "PreviewScreen from camera normalizedUri=$imagePath replacePageId=$editingPageId")
                     previewImagePath = imagePath
                     cropCorners = null
                     cropImagePath = null
@@ -315,9 +307,6 @@ fun ScanBaseApp(
                 }
             )
         }
-        composable(Screen.GalleryImport.route) {
-            GalleryImportScreen(onBackClick = navController::navigateUp)
-        }
         composable(Screen.Preview.route) {
             PreviewScreen(
                 imagePath = previewImagePath,
@@ -347,7 +336,6 @@ fun ScanBaseApp(
                 },
                 onCropClick = {
                     val imagePath = previewImagePath
-                    Log.d(AppTag, "CropScreen normalizedUri=$imagePath")
                     if (imagePath != null) {
                         cropViewModel.resetIfImageChanged(imagePath)
                         if (!cropViewModel.state.isInitialized) {
@@ -477,6 +465,11 @@ fun ScanBaseApp(
                             PdfExporter.save(context, scanDocument)
                         }.onSuccess { file ->
                             savedPdfPath = file.absolutePath
+                            val record = DocumentRecord.fromPdfFile(
+                                file = file,
+                                pageCount = scanDocument.pages.size
+                            )
+                            recentDocuments = documentRecordStore.add(record)
                             documentMessage = "\u0050\u0044\u0046 \uC800\uC7A5 \uC644\uB8CC"
                         }.onFailure {
                             documentMessage = "\u0050\u0044\u0046 \uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4."
@@ -497,6 +490,42 @@ fun ScanBaseApp(
                             documentMessage = "\u0050\u0044\u0046 \uACF5\uC720\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4."
                         }
                     }
+                }
+            )
+        }
+        composable(Screen.RecentDocuments.route) {
+            RecentDocumentsScreen(
+                records = recentDocuments,
+                message = recentMessage,
+                pendingDeleteRecord = pendingDeleteRecord,
+                onBackClick = navController::navigateUp,
+                onOpenClick = { record ->
+                    val opened = PdfExporter.open(context, File(record.pdfPath))
+                    if (!opened) {
+                        recentMessage = "PDF를 열 수 있는 앱이 없습니다."
+                    }
+                },
+                onShareClick = { record ->
+                    runCatching { PdfExporter.share(context, File(record.pdfPath)) }
+                        .onFailure { recentMessage = "PDF 공유에 실패했습니다." }
+                },
+                onDeleteClick = { record -> pendingDeleteRecord = record },
+                onDismissDelete = { pendingDeleteRecord = null },
+                onConfirmDelete = { record ->
+                    when (documentRecordStore.delete(record.id)) {
+                        DeleteResult.Deleted -> {
+                            recentDocuments = documentRecordStore.load()
+                            recentMessage = "문서를 삭제했습니다."
+                        }
+                        DeleteResult.FileDeleteFailed -> {
+                            recentMessage = "PDF 파일을 삭제하지 못했습니다."
+                        }
+                        DeleteResult.NotFound -> {
+                            recentDocuments = documentRecordStore.load()
+                            recentMessage = "문서를 찾을 수 없습니다."
+                        }
+                    }
+                    pendingDeleteRecord = null
                 }
             )
         }
@@ -536,10 +565,6 @@ fun ScanBaseApp(
                             cropMessage = "선택 영역을 보정할 수 없습니다. 코너를 다시 조정해주세요."
                         } else {
                             val processedPath = processedUri.toString()
-                            Log.d(
-                                AppTag,
-                                "CropScreen apply latest userCorners=$latestCorners processedPath=$processedPath"
-                            )
                             cropMessage = null
                             cropCorners = latestCorners
                             cropImagePath = imagePath
@@ -606,9 +631,9 @@ fun ScanBaseApp(
 private sealed class Screen(val route: String) {
     data object Home : Screen("home")
     data object Camera : Screen("camera")
-    data object GalleryImport : Screen("gallery_import")
     data object Preview : Screen("preview")
     data object DocumentPreview : Screen("document_preview")
+    data object RecentDocuments : Screen("recent_documents")
     data object Crop : Screen("crop")
     data object Enhance : Screen("enhance")
 }
@@ -666,15 +691,6 @@ fun CameraScreen(
         onRequestCameraPermission = onRequestCameraPermission,
         onBackClick = onBackClick,
         onImageCaptured = onImageCaptured
-    )
-}
-
-@Composable
-fun GalleryImportScreen(onBackClick: () -> Unit) {
-    PlaceholderScreen(
-        title = "\uAC24\uB7EC\uB9AC\uC5D0\uC11C \uAC00\uC838\uC624\uAE30",
-        message = "\uD648 \uD654\uBA74\uC5D0\uC11C \uC774\uBBF8\uC9C0\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.",
-        onBackClick = onBackClick
     )
 }
 
@@ -770,6 +786,174 @@ fun DocumentPreviewScreen(
     }
 }
 
+@Composable
+fun RecentDocumentsScreen(
+    records: List<DocumentRecord>,
+    message: String?,
+    pendingDeleteRecord: DocumentRecord?,
+    onBackClick: () -> Unit,
+    onOpenClick: (DocumentRecord) -> Unit,
+    onShareClick: (DocumentRecord) -> Unit,
+    onDeleteClick: (DocumentRecord) -> Unit,
+    onDismissDelete: () -> Unit,
+    onConfirmDelete: (DocumentRecord) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF7F8FA))
+            .padding(horizontal = 20.dp, vertical = 24.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BackButton(onClick = onBackClick)
+            BasicText(
+                text = "최근 문서",
+                style = TextStyle(
+                    color = Color(0xFF111827),
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 58.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        if (message != null) {
+            NoticeText(text = message)
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        pendingDeleteRecord?.let { record ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFFFFF7ED))
+                    .padding(12.dp)
+            ) {
+                BasicText(
+                    text = "이 문서를 삭제할까요?",
+                    style = TextStyle(
+                        color = Color(0xFF111827),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                BasicText(
+                    text = record.title,
+                    style = TextStyle(color = Color(0xFF4B5563), fontSize = 13.sp)
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SmallActionButton(
+                        text = "취소",
+                        enabled = true,
+                        onClick = onDismissDelete,
+                        modifier = Modifier.weight(1f),
+                        backgroundColor = Color(0xFF6B7280)
+                    )
+                    SmallActionButton(
+                        text = "삭제",
+                        enabled = true,
+                        onClick = { onConfirmDelete(record) },
+                        modifier = Modifier.weight(1f),
+                        backgroundColor = Color(0xFFB91C1C)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        if (records.isEmpty()) {
+            PlaceholderContent(
+                title = "저장된 문서 없음",
+                message = "PDF로 저장한 문서가 여기에 표시됩니다."
+            )
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                records.forEach { record ->
+                    RecentDocumentItem(
+                        record = record,
+                        onOpenClick = onOpenClick,
+                        onShareClick = onShareClick,
+                        onDeleteClick = onDeleteClick
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentDocumentItem(
+    record: DocumentRecord,
+    onOpenClick: (DocumentRecord) -> Unit,
+    onShareClick: (DocumentRecord) -> Unit,
+    onDeleteClick: (DocumentRecord) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.White)
+            .padding(12.dp)
+    ) {
+        BasicText(
+            text = record.title,
+            style = TextStyle(
+                color = Color(0xFF111827),
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        BasicText(
+            text = "${record.createdAtText} · ${record.pageCount}페이지 · ${record.fileSizeText}",
+            style = TextStyle(color = Color(0xFF4B5563), fontSize = 13.sp)
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SmallActionButton(
+                text = "열기",
+                enabled = true,
+                onClick = { onOpenClick(record) },
+                modifier = Modifier.weight(1f)
+            )
+            SmallActionButton(
+                text = "공유",
+                enabled = true,
+                onClick = { onShareClick(record) },
+                modifier = Modifier.weight(1f)
+            )
+            SmallActionButton(
+                text = "삭제",
+                enabled = true,
+                onClick = { onDeleteClick(record) },
+                modifier = Modifier.weight(1f),
+                backgroundColor = Color(0xFFB91C1C)
+            )
+        }
+    }
+}
 @Composable
 fun PreviewScreen(
     imagePath: String?,
@@ -897,7 +1081,6 @@ fun EnhanceScreen(
             enhancedPaths = enhancedPaths + (selectedMode to enhancedPath)
             displayImagePath = enhancedPath
             errorMessage = null
-            Log.d(AppTag, "EnhanceScreen mode=$selectedMode path=$enhancedPath")
         }
     }
 
@@ -990,7 +1173,6 @@ fun EnhanceScreen(
                     if (selectedPath == null) {
                         errorMessage = "이미지 보정에 실패했습니다. 다른 모드를 선택해주세요."
                     } else {
-                        Log.d(AppTag, "EnhanceScreen add page mode=$selectedMode path=$selectedPath")
                         onAddPageClick(selectedPath, selectedMode)
                     }
                 }
@@ -1197,7 +1379,6 @@ private fun CropImageWithCorners(
                         onSelectCorner(activeCorner)
                         activeCorner?.let { corner ->
                             val point = activeCorners.pointFor(corner)
-                            Log.d(AppTag, "CropScreen dragStart corner=${corner.logName} x=${point.x} y=${point.y}")
                         }
                     },
                     onDrag = { change, dragAmount ->
@@ -1222,12 +1403,10 @@ private fun CropImageWithCorners(
                     onDragEnd = {
                         activeCorner?.let { corner ->
                             val point = latestCorners?.pointFor(corner)
-                            Log.d(AppTag, "CropScreen dragEnd corner=${corner.logName} x=${point?.x} y=${point?.y}")
                         }
                         activeCorner = null
                     },
                     onDragCancel = {
-                        Log.d(AppTag, "CropScreen dragCancel")
                         activeCorner = null
                     }
                 )
@@ -1631,23 +1810,6 @@ private fun ImagePreviewArea(
 }
 
 @Composable
-private fun PlaceholderScreen(
-    title: String,
-    message: String,
-    onBackClick: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFFF7F8FA))
-            .padding(horizontal = 20.dp, vertical = 24.dp)
-    ) {
-        BackButton(onClick = onBackClick)
-        PlaceholderContent(title = title, message = message)
-    }
-}
-
-@Composable
 private fun PlaceholderContent(
     title: String,
     message: String
@@ -1715,25 +1877,6 @@ private fun NoticeText(text: String) {
             .clip(RoundedCornerShape(10.dp))
             .background(Color(0xFFFFF7ED))
             .padding(12.dp)
-    )
-}
-
-@Composable
-private fun CornerText(
-    label: String,
-    x: Float,
-    y: Float
-) {
-    BasicText(
-        text = "$label: (${x.toInt()}, ${y.toInt()})",
-        style = TextStyle(
-            color = Color(0xFF374151),
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
     )
 }
 
@@ -1842,21 +1985,6 @@ private fun HomeButton(
     }
 }
 
-private fun resolveImageExtension(context: Context, uri: Uri): String {
-    val mimeType = context.contentResolver.getType(uri)
-    val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
-    return extension?.takeIf { it.isNotBlank() } ?: "jpg"
-}
-
-private fun createGalleryCacheFile(context: Context, extension: String): File {
-    val directory = File(context.cacheDir, "imports").apply {
-        mkdirs()
-    }
-    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
-        .format(System.currentTimeMillis())
-    return File(directory, "gallery_$timestamp.$extension")
-}
-
 private fun movePage(
     pages: List<ScanPage>,
     pageId: Long,
@@ -1887,6 +2015,11 @@ private fun decodeBitmapFromUriString(
         }
     }
 }
+
+
+
+
+
 
 
 

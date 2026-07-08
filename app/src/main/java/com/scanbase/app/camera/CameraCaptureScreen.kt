@@ -1,7 +1,6 @@
 ﻿package com.scanbase.app.camera
 
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
 import android.view.Surface
@@ -241,7 +240,6 @@ private fun CameraPreviewContent(
             },
             update = { view ->
                 view.scaleType = PreviewView.ScaleType.FIT_CENTER
-                Log.d(CameraTag, "AndroidView update PreviewView scaleType=${view.scaleType}")
             },
             modifier = Modifier.fillMaxSize()
         )
@@ -336,14 +334,12 @@ private fun takePhoto(
     val imageFile = createCacheImageFile(context)
     val outputOptions = ImageCapture.OutputFileOptions.Builder(imageFile).build()
 
-    Log.d(CameraTag, "takePhoto imageCaptureTargetRotation=${imageCapture.targetRotation}")
     imageCapture.takePicture(
         outputOptions,
         executor,
         object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                 val sourceUri = Uri.fromFile(imageFile)
-                Log.d(CameraTag, "capture sourceUri=$sourceUri")
                 val normalizedUri = ImageFileNormalizer.normalizeToCache(
                     context = context,
                     sourceUri = sourceUri,
@@ -352,8 +348,6 @@ private fun takePhoto(
                 if (normalizedUri == null) {
                     onError()
                 } else {
-                    logImageSize(context, normalizedUri, "capture normalized image")
-                    Log.d(CameraTag, "capture normalizedUri=$normalizedUri")
                     imageFile.delete()
                     onSuccess(normalizedUri.toString())
                 }
@@ -365,20 +359,6 @@ private fun takePhoto(
             }
         }
     )
-}
-
-private fun logImageSize(context: Context, uri: Uri, label: String) {
-    val options = BitmapFactory.Options().apply {
-        inJustDecodeBounds = true
-    }
-    if (uri.scheme == "file") {
-        BitmapFactory.decodeFile(uri.path, options)
-    } else {
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, options)
-        }
-    }
-    Log.d(CameraTag, "$label width=${options.outWidth} height=${options.outHeight}")
 }
 
 private fun createCacheImageFile(context: Context): File {
@@ -477,5 +457,7 @@ private fun TextButton(
             .padding(vertical = 16.dp)
     )
 }
+
+
 
 

@@ -1,5 +1,6 @@
 ﻿package com.scanbase.app.pdf
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
@@ -33,7 +34,7 @@ object PdfExporter {
         }
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
             .format(System.currentTimeMillis())
-        val pdfFile = File(pdfDirectory, "scanbase_$timestamp.pdf")
+        val pdfFile = createUniquePdfFile(pdfDirectory, "ScanBase_$timestamp.pdf")
 
         val pdfDocument = PdfDocument()
         try {
@@ -72,7 +73,31 @@ object PdfExporter {
         return pdfFile
     }
 
+
+    fun open(context: Context, pdfFile: File): Boolean {
+        if (!pdfFile.exists()) return false
+
+        return try {
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                pdfFile
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/pdf")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            true
+        } catch (exception: ActivityNotFoundException) {
+            false
+        }
+    }
+
     fun share(context: Context, pdfFile: File) {
+        require(pdfFile.exists()) { "PDF file does not exist." }
+
         val uri = FileProvider.getUriForFile(
             context,
             "${context.packageName}.fileprovider",
@@ -89,6 +114,16 @@ object PdfExporter {
         )
     }
 
+    private fun createUniquePdfFile(directory: File, fileName: String): File {
+        val baseName = fileName.removeSuffix(".pdf")
+        var candidate = File(directory, fileName)
+        var index = 1
+        while (candidate.exists()) {
+            candidate = File(directory, "${baseName}_$index.pdf")
+            index += 1
+        }
+        return candidate
+    }
     private fun decodeBitmap(context: Context, uriString: String): android.graphics.Bitmap? {
         val uri = Uri.parse(uriString)
         return if (uri.scheme == "file") {
@@ -113,4 +148,8 @@ object PdfExporter {
         return RectF(left, top, left + width, top + height)
     }
 }
+
+
+
+
 

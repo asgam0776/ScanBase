@@ -35,12 +35,7 @@ object ImageQualityAnalyzer {
             QualityResult.fromScores(
                 blurScore = blurScore,
                 brightness = brightness
-            ).also { result ->
-                Log.d(
-                    Tag,
-                    "quality blurScore=${result.blurScore} brightness=${result.brightness} warnings=${result.warnings.size}"
-                )
-            }
+            )
         } catch (exception: Exception) {
             Log.d(Tag, "quality analysis failed", exception)
             null
@@ -66,3 +61,4 @@ object ImageQualityAnalyzer {
         return Bitmap.createScaledBitmap(this, targetWidth, targetHeight, true)
     }
 }
+
