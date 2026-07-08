@@ -75,6 +75,8 @@ import com.scanbase.app.data.ScanPage
 import com.scanbase.app.image.CropCoordinateMapper
 import com.scanbase.app.image.CropPoint
 import com.scanbase.app.image.DocumentDetector
+import com.scanbase.app.image.EnhanceMode
+import com.scanbase.app.image.ImageEnhancer
 import com.scanbase.app.image.ImageFileNormalizer
 import com.scanbase.app.image.OpenCvRuntime
 import com.scanbase.app.image.PerspectiveTransformer
@@ -404,36 +406,36 @@ fun ScanBaseApp(
                             cropCorners = latestCorners
                             cropImagePath = imagePath
                             resultImagePath = processedPath
-                            previewImagePath = processedPath
-                            navController.navigate(Screen.ResultPreview.route)
+                            navController.navigate(Screen.Enhance.route)
                         }
                     }
                 }
             )
         }
 
-        composable(Screen.ResultPreview.route) {
-            ResultPreviewScreen(
+        composable(Screen.Enhance.route) {
+            EnhanceScreen(
                 imagePath = resultImagePath,
                 onBackClick = navController::navigateUp,
-                onAddPageClick = {
-                    resultImagePath?.let { imagePath ->
-                        val page = ScanPage(
-                            id = System.currentTimeMillis(),
-                            imagePath = imagePath,
-                            createdAtMillis = System.currentTimeMillis()
-                        )
-                        scanDocument = scanDocument.copy(
-                            pages = scanDocument.pages + page
-                        )
-                        selectedPageId = page.id
-                        savedPdfPath = null
-                        documentMessage = null
-                    }
+                onRecropClick = navController::navigateUp,
+                onAddPageClick = { enhancedImagePath ->
+                    val page = ScanPage(
+                        id = System.currentTimeMillis(),
+                        imagePath = enhancedImagePath,
+                        createdAtMillis = System.currentTimeMillis()
+                    )
+                    scanDocument = scanDocument.copy(
+                        pages = scanDocument.pages + page
+                    )
+                    selectedPageId = page.id
+                    savedPdfPath = null
+                    documentMessage = null
+                    previewImagePath = enhancedImagePath
                     navController.navigate(Screen.DocumentPreview.route)
                 }
             )
-        }    }
+        }
+}
 }
 
 private sealed class Screen(val route: String) {
@@ -443,7 +445,7 @@ private sealed class Screen(val route: String) {
     data object Preview : Screen("preview")
     data object DocumentPreview : Screen("document_preview")
     data object Crop : Screen("crop")
-    data object ResultPreview : Screen("result_preview")
+    data object Enhance : Screen("enhance")
 }
 
 @Composable
@@ -649,11 +651,58 @@ fun PreviewScreen(
 }
 
 @Composable
-fun ResultPreviewScreen(
+fun EnhanceScreen(
     imagePath: String?,
     onBackClick: () -> Unit,
-    onAddPageClick: () -> Unit
+    onRecropClick: () -> Unit,
+    onAddPageClick: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    val sourceBitmap = remember(imagePath) {
+        imagePath?.let { decodeBitmapFromUriString(context, it) }
+    }
+    var selectedModeName by rememberSaveable(imagePath) { mutableStateOf(EnhanceMode.Original.name) }
+    val selectedMode = runCatching { EnhanceMode.valueOf(selectedModeName) }
+        .getOrDefault(EnhanceMode.Original)
+    var enhancedPaths by remember(imagePath) {
+        mutableStateOf<Map<EnhanceMode, String>>(
+            imagePath?.let { mapOf(EnhanceMode.Original to it) } ?: emptyMap()
+        )
+    }
+    var displayImagePath by remember(imagePath) { mutableStateOf(imagePath) }
+    var errorMessage by remember(imagePath) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(imagePath, selectedMode) {
+        if (imagePath == null || sourceBitmap == null) {
+            displayImagePath = null
+            return@LaunchedEffect
+        }
+
+        val cachedPath = enhancedPaths[selectedMode]
+        if (cachedPath != null) {
+            displayImagePath = cachedPath
+            errorMessage = null
+            return@LaunchedEffect
+        }
+
+        val enhancedUri = ImageEnhancer.enhanceToCache(
+            context = context,
+            sourceBitmap = sourceBitmap,
+            mode = selectedMode
+        )
+
+        if (enhancedUri == null) {
+            displayImagePath = null
+            errorMessage = "이미지 보정에 실패했습니다. 다른 모드를 선택해주세요."
+        } else {
+            val enhancedPath = enhancedUri.toString()
+            enhancedPaths = enhancedPaths + (selectedMode to enhancedPath)
+            displayImagePath = enhancedPath
+            errorMessage = null
+            Log.d(AppTag, "EnhanceScreen mode=$selectedMode path=$enhancedPath")
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -666,7 +715,7 @@ fun ResultPreviewScreen(
         ) {
             BackButton(onClick = onBackClick)
             BasicText(
-                text = "보정 결과",
+                text = "보정",
                 style = TextStyle(
                     color = Color(0xFF111827),
                     fontSize = 24.sp,
@@ -679,26 +728,93 @@ fun ResultPreviewScreen(
             )
         }
 
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height(14.dp))
 
-        if (imagePath == null) {
+        if (imagePath == null || sourceBitmap == null) {
             PlaceholderContent(
                 title = "이미지 없음",
-                message = "보정된 이미지가 없습니다."
+                message = "보정할 이미지가 없습니다."
             )
         } else {
-            ImagePreviewArea(
-                imagePath = imagePath,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
+            if (errorMessage != null) {
+                NoticeText(text = errorMessage.orEmpty())
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
+            val currentDisplayPath = displayImagePath
+            if (currentDisplayPath == null) {
+                PlaceholderContent(
+                    title = "보정 실패",
+                    message = "다른 보정 모드를 선택해주세요."
+                )
+            } else {
+                ImagePreviewArea(
+                    imagePath = currentDisplayPath,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                EnhanceModeButton(
+                    text = "원본",
+                    selected = selectedMode == EnhanceMode.Original,
+                    onClick = { selectedModeName = EnhanceMode.Original.name },
+                    modifier = Modifier.weight(1f)
+                )
+                EnhanceModeButton(
+                    text = "문서",
+                    selected = selectedMode == EnhanceMode.Document,
+                    onClick = { selectedModeName = EnhanceMode.Document.name },
+                    modifier = Modifier.weight(1f)
+                )
+                EnhanceModeButton(
+                    text = "흑백",
+                    selected = selectedMode == EnhanceMode.BlackWhite,
+                    onClick = { selectedModeName = EnhanceMode.BlackWhite.name },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            ActionButton(text = "다시 자르기", onClick = onRecropClick)
+            Spacer(modifier = Modifier.height(10.dp))
+            ActionButton(
+                text = "페이지에 추가",
+                onClick = {
+                    val selectedPath = displayImagePath
+                    if (selectedPath == null) {
+                        errorMessage = "이미지 보정에 실패했습니다. 다른 모드를 선택해주세요."
+                    } else {
+                        Log.d(AppTag, "EnhanceScreen add page mode=$selectedMode path=$selectedPath")
+                        onAddPageClick(selectedPath)
+                    }
+                }
             )
-
-            Spacer(modifier = Modifier.height(18.dp))
-
-            ActionButton(text = "페이지에 추가", onClick = onAddPageClick)
         }
     }
+}
+
+@Composable
+private fun EnhanceModeButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    SmallActionButton(
+        text = text,
+        enabled = true,
+        onClick = onClick,
+        modifier = modifier,
+        backgroundColor = if (selected) Color(0xFF2563EB) else Color(0xFF374151)
+    )
 }
 @Composable
 fun CropScreen(
@@ -1448,6 +1564,9 @@ private fun decodeBitmapFromUriString(
         }
     }
 }
+
+
+
 
 
 
